@@ -55,6 +55,11 @@
 #define ANON_REQ_TYPE_REGIONS      0x01
 #define ANON_REQ_TYPE_OWNER        0x02
 #define ANON_REQ_TYPE_BASIC        0x03   // just remote clock
+#define ANON_REQ_TYPE_LINK_STATS   0x1C   // PCES link statistics (provisional; must stay below 0x20, see onAnonDataRecv)
+
+#define PCES_FEAT1_LINK_STATS      0xC504 // advert feature 1: Commsol/PCES family 0xC5xx, bit 2 = answers link stats
+#define LINK_STATS_PREF_FILE       "/pces_ls"
+#define LINK_STATS_MAX_REPLY       167    // MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1)
 
 #define CLI_REPLY_DELAY_MILLIS      600
 
@@ -179,6 +184,126 @@ uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender
     return 8 + strlen((char *) &reply_data[8]);   // reply length
   }
   return 0;
+}
+
+// PCES link statistics (Commsol docs/pces-link-stats.md). Request data after the sub-type:
+// {reply-path-len}{reply-path}{version=1}{offset}{count}{prefix_len}
+uint8_t MyMesh::handleAnonLinkStatsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len) {
+  if (!anon_limiter.allow(rtc_clock.getCurrentTime())) return 0;
+  if (len < 1) return 0;
+  reply_path_len = *data++; len--;
+  if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
+  size_t path_bytes = mesh::Packet::writePath(reply_path, data, reply_path_len);
+  if (len < path_bytes + 4) return 0;
+  data += path_bytes;
+  if (data[0] != 1) return 0;   // version
+  uint8_t offset = data[1], count = data[2], prefix_len = data[3];
+
+  memcpy(reply_data, &sender_timestamp, 4);   // prefix with sender_timestamp, like a tag
+  uint32_t now = getRTCClock()->getCurrentTime();
+  memcpy(&reply_data[4], &now, 4);
+  int i = 8;
+  reply_data[i++] = 1;   // version
+  reply_data[i++] = 0x01 | (link_stats.wasFull() ? 0x02 : 0);
+  int nf = _radio->getNoiseFloor();
+  reply_data[i++] = (uint8_t)(int8_t)(nf < -128 ? -128 : nf > 127 ? 127 : nf);
+  reply_data[i++] = (uint8_t)(LINK_STATS_HALF_LIFE_SECS / 3600);
+  uint32_t up_h = (uint32_t)(uptime_millis / 3600000ULL);
+  uint16_t up = up_h > 65535 ? 65535 : (uint16_t)up_h;
+  memcpy(&reply_data[i], &up, 2); i += 2;
+  reply_data[i++] = (uint8_t)link_stats.count();
+  reply_data[i++] = offset;
+  uint8_t* n_pos = &reply_data[i++];
+  uint8_t written = 0;
+  i += link_stats.encode(&reply_data[i], LINK_STATS_MAX_REPLY - i, offset, count, prefix_len, now, &written);
+  *n_pos = written;
+  return i;
+}
+
+static void fmtTenths(char* out, float v, bool sign) {   // no %f: newlib-nano on some boards lacks it
+  long t = lroundf(v * 10.0f);
+  char sg = t < 0 ? '-' : (sign ? '+' : 0);
+  if (t < 0) t = -t;
+  if (sg) sprintf(out, "%c%ld.%ld", sg, t / 10, t % 10);
+  else sprintf(out, "%ld.%ld", t / 10, t % 10);
+}
+
+static void fmtKey(char* out, const LinkStatEntry& e) {
+  int n = (e.kind & LINK_KIND_RESOLVED) ? 2 : (e.kind & LINK_KIND_WIDTH_MASK) + 1;
+  for (int i = 0; i < n; i++) sprintf(&out[i * 2], "%02X", (uint32_t)e.key[i]);
+  if (!(e.kind & LINK_KIND_RESOLVED)) strcat(out, "?");
+}
+
+static void fmtAge(char* out, uint32_t secs) {
+  if (secs < 3600) sprintf(out, "%lum", (unsigned long)(secs / 60));
+  else if (secs < 172800) sprintf(out, "%luh", (unsigned long)(secs / 3600));
+  else sprintf(out, "%lud", (unsigned long)(secs / 86400));
+}
+
+// CLI "linkstats [N]": the table, highest weight first. Remote: lines from N while they fit in a
+// CLI reply. Serial: every entry, with RSSI and sample count.
+void MyMesh::formatLinkStats(char* reply, int offset, bool serial) {
+  uint32_t now = getRTCClock()->getCurrentTime();
+  const LinkStatEntry* list[MAX_LINK_STATS];
+  int n = link_stats.sorted(list, MAX_LINK_STATS, now);
+  if (!link_stats_on) { strcpy(reply, "linkstats off (set pces.linkstats on)"); return; }
+  if (serial) {
+    Serial.printf("link stats: %d of %d, half-life %luh\n", n, MAX_LINK_STATS, (unsigned long)(LINK_STATS_HALF_LIFE_SECS / 3600));
+    for (int i = 0; i < n; i++) {
+      const LinkStatEntry& e = *list[i];
+      char k[12] = "", m[12], d[12], a[12];
+      fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
+      fmtAge(a, now > e.t_last ? now - e.t_last : 0);
+      Serial.printf("%-7s snr %s sd %s w %d rssi %d n %u age %s%s\n", k, m, d,
+                    (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), e.wr > 0 ? (int)lroundf(e.rssi) : 0,
+                    (uint32_t)e.n, a, (e.kind & LINK_KIND_ADVERT_ONLY) ? " advert" : "");
+    }
+    reply[0] = 0;
+    return;
+  }
+  int pos = sprintf(reply, "%d links%s", n, offset ? "" : " (linkstats N: from N)");
+  for (int i = offset; i < n; i++) {
+    const LinkStatEntry& e = *list[i];
+    char line[48], k[12] = "", m[12], d[12], a[12];
+    fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
+    fmtAge(a, now > e.t_last ? now - e.t_last : 0);
+    int len = sprintf(line, "\n%s %s/%s w%d %s", k, m, d, (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), a);
+    if (pos + len > 150) break;
+    strcpy(&reply[pos], line);
+    pos += len;
+  }
+}
+
+void MyMesh::loadLinkStatsPref() {
+  link_stats_on = true;   // default: flashing this firmware is the opt-in
+  if (_fs->exists(LINK_STATS_PREF_FILE)) {
+#if defined(RP2040_PLATFORM)
+    File f = _fs->open(LINK_STATS_PREF_FILE, "r");
+#else
+    File f = _fs->open(LINK_STATS_PREF_FILE);
+#endif
+    if (f) {
+      uint8_t v = 1;
+      if (f.read(&v, 1) == 1) link_stats_on = v != 0;
+      f.close();
+    }
+  }
+}
+
+void MyMesh::saveLinkStatsPref() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(LINK_STATS_PREF_FILE);
+  File f = _fs->open(LINK_STATS_PREF_FILE, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  File f = _fs->open(LINK_STATS_PREF_FILE, "w");
+#else
+  File f = _fs->open(LINK_STATS_PREF_FILE, "w", true);
+#endif
+  if (f) {
+    uint8_t v = link_stats_on ? 1 : 0;
+    f.write(&v, 1);
+    f.close();
+  }
 }
 
 uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
@@ -378,7 +503,7 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
 
 mesh::Packet *MyMesh::createSelfAdvert() {
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
-  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data);
+  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data, link_stats_on ? PCES_FEAT1_LINK_STATS : 0);
 
   return createAdvert(self_id, app_data, app_data_len);
 }
@@ -476,7 +601,62 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
+// The neighbour this copy was heard from, by its hash: exactly one stock neighbour-table entry
+// (zero-hop repeater adverts) with that prefix -> its key prefix.
+bool MyMesh::resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4) {
+#if MAX_NEIGHBOURS
+  int found = -1;
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp == 0) continue;
+    if (memcmp(neighbours[i].id.pub_key, hash, len) == 0) {
+      if (found >= 0) return false;   // several share the hash
+      found = i;
+    }
+  }
+  if (found < 0) return false;
+  memcpy(key4, neighbours[found].id.pub_key, 4);
+  return true;
+#else
+  return false;
+#endif
+}
+
+// Every received copy (called from logRx, duplicates included): the hop that sent it, when the
+// packet names it. Flood: the last hash of the path. TRACE: route hop k-1 after k SNR bytes.
+// Others (direct: the path holds the hops still ahead; zero-hop: the originator) name no sender.
+void MyMesh::sampleLinkStats(const mesh::Packet* pkt) {
+  if (!link_stats_on) return;
+  const uint8_t* hash = NULL;
+  uint8_t w = 0;
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) {
+    if (!pkt->isRouteDirect() || pkt->payload_len < 9) return;
+    uint8_t k = pkt->path_len;   // TRACE: raw count of SNR bytes appended so far
+    if (k == 0 || k >= MAX_PATH_SIZE) return;
+    uint8_t sz = pkt->payload[8] & 0x03;
+    w = 1 << sz;
+    uint16_t off = 9 + ((uint16_t)(k - 1) << sz);
+    if (off + w > pkt->payload_len) return;
+    hash = &pkt->payload[off];
+  } else if (pkt->isRouteFlood()) {
+    uint8_t k = pkt->getPathHashCount();
+    if (k == 0) return;   // the originator (zero-hop adverts: onAdvertRecv)
+    w = pkt->getPathHashSize();
+    hash = &pkt->path[(k - 1) * w];
+  } else {
+    return;
+  }
+  if (self_id.isHashMatch(hash, w)) return;
+  uint32_t now = getRTCClock()->getCurrentTime();
+  uint8_t key[4];
+  if (resolveNeighbour(hash, w, key)) {
+    link_stats.sample(key, 4, true, false, pkt->getSNR(), _radio->getLastRSSI(), true, now);
+  } else {
+    link_stats.sample(hash, w > 3 ? 3 : w, false, false, pkt->getSNR(), _radio->getLastRSSI(), true, now);
+  }
+}
+
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+  sampleLinkStats(pkt);   // PCES link statistics: receive side only
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
     bridge.sendPacket(pkt);
@@ -587,6 +767,8 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
       reply_len = handleAnonOwnerReq(sender, timestamp, &data[5]);
     } else if (data[4] == ANON_REQ_TYPE_BASIC && packet->isRouteDirect()) {
       reply_len = handleAnonClockReq(sender, timestamp, &data[5]);
+    } else if (data[4] == ANON_REQ_TYPE_LINK_STATS && packet->isRouteDirect() && link_stats_on && len > 5) {
+      reply_len = handleAnonLinkStatsReq(sender, timestamp, &data[5], len - 5);
     } else {
       reply_len = 0;  // unknown/invalid request type
     }
@@ -656,6 +838,11 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
+    }
+    // PCES link statistics: repeaters and room servers only (never companions: no public list of
+    // the phones this repeater hears). SNR only: the advert may be processed after a receive delay.
+    if (link_stats_on && parser.isValid() && (parser.getType() == ADV_TYPE_REPEATER || parser.getType() == ADV_TYPE_ROOM)) {
+      link_stats.sample(id.pub_key, 4, true, true, packet->getSNR(), 0, false, getRTCClock()->getCurrentTime());
     }
   }
 }
@@ -866,7 +1053,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4),
       discover_limiter(4, 120),  // max 4 every 2 minutes
-      anon_limiter(4, 180)   // max 4 every 3 minutes
+      anon_limiter(4, 180),  // max 4 every 3 minutes
+      link_stats_on(true)
 #if defined(WITH_RS232_BRIDGE)
       , bridge(&_prefs, WITH_RS232_BRIDGE, _mgr, &rtc)
 #endif
@@ -948,6 +1136,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
+  loadLinkStatsPref();
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1272,6 +1461,22 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
+  } else if (strcmp(command, "get pces.linkstats") == 0) {
+    sprintf(reply, "> %s", link_stats_on ? "on" : "off");
+  } else if (memcmp(command, "set pces.linkstats ", 19) == 0) {
+    const char* v = &command[19];
+    if (strcmp(v, "on") == 0 || strcmp(v, "off") == 0) {
+      link_stats_on = v[1] == 'n';
+      saveLinkStatsPref();
+      strcpy(reply, "OK - advert marker from the next advert");
+    } else {
+      strcpy(reply, "Err - on or off");
+    }
+  } else if (strcmp(command, "linkstats clear") == 0) {
+    link_stats.clear();
+    strcpy(reply, "OK");
+  } else if (memcmp(command, "linkstats", 9) == 0 && (command[9] == 0 || command[9] == ' ')) {
+    formatLinkStats(reply, command[9] == ' ' ? atoi(&command[10]) : 0, sender_timestamp == 0);
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {
     const char* sub = command + 18;
     while (*sub == ' ') sub++;

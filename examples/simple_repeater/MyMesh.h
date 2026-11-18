@@ -36,6 +36,7 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
+#include <helpers/LinkStats.h>
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -103,6 +104,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
+  LinkStats link_stats;      // PCES link statistics (Commsol docs/pces-link-stats.md)
+  bool link_stats_on;
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
   float pending_freq;
@@ -121,6 +124,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
+  uint8_t handleAnonLinkStatsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len);
+  bool resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4);
+  void sampleLinkStats(const mesh::Packet* pkt);
+  void formatLinkStats(char* reply, int offset, bool serial);
+  void loadLinkStatsPref();
+  void saveLinkStatsPref();
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   mesh::Packet* createSelfAdvert();
 
