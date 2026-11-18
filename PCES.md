@@ -55,7 +55,20 @@ For a node already running a MeshCore repeater (with the OTA-capable bootloader)
    it to finish and restart (a minute or two). Stay within a few metres: it is Bluetooth.
 4. Log in again and check (below).
 
-### Seeed SenseCAP Solar: over USB
+### Over USB with the MeshCore web flasher (both boards, easiest)
+
+Chrome or Edge on a computer (Web Serial). At [flasher.meshcore.co.uk](https://flasher.meshcore.co.uk) pick
+**Custom Firmware** and choose the file; keep its name as it is:
+
+- SenseCAP Solar: `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip`, as it is (serial DFU; the flasher's
+  **Enter DFU mode** button, or double-press reset).
+- Heltec V4: `…-update.bin` to update (written at 0x10000, keeps identity and settings), or `…-merged.bin`
+  for a first install. The flasher goes by the name: a file ending in `-merged.bin` is written at 0x0 after
+  erasing the whole flash (it warns first).
+
+Don't use **Erase Flash** unless you mean to wipe the node's identity and settings.
+
+### Seeed SenseCAP Solar: over USB, from the command line
 
 1. Double-press its reset button: the bootloader starts (a USB drive and serial port appear).
 2. `adafruit-nrfutil dfu serial --package SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip -p <port> -b 115200`
@@ -70,7 +83,7 @@ For a V4 already running a MeshCore repeater:
 2. Join `MeshCore-OTA` from a phone or laptop, open `http://192.168.4.1/update`, upload
    `heltec_v4_repeater-v1.18.0-pces1-update.bin`. It restarts when done.
 
-### Heltec V4: over USB
+### Heltec V4: over USB, from the command line
 
 - First install, or replacing other firmware:
   `esptool.py --chip esp32s3 write_flash 0x0 heltec_v4_repeater-v1.18.0-pces1-merged.bin`
