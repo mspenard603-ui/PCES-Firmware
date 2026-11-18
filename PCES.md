@@ -55,6 +55,19 @@ For a node already running a MeshCore repeater (with the OTA-capable bootloader)
    it to finish and restart (a minute or two). Stay within a few metres: it is Bluetooth.
 4. Log in again and check (below).
 
+### Seeed SenseCAP Solar: over the air (BLE), from a Windows PC
+
+Nordic's `nrfutil dfu ble` does not fit: it speaks Secure DFU only and needs a Nordic dongle, while the
+board's Adafruit bootloader speaks Legacy DFU. Use [nrf_dfu_py](https://github.com/recrof/nrf_dfu_py)
+(Legacy DFU over the PC's own Bluetooth via bleak; tested by its author on XIAO nRF52). Not yet tried
+with this build: keep USB as the fallback.
+
+1. Python 3.9+ (python.org, "Add python.exe to PATH"); `git clone https://github.com/recrof/nrf_dfu_py`,
+   `cd nrf_dfu_py`, `pip install bleak`. Or its release `NordicDFU-Windows-x64.exe` (the same in a window).
+2. On the node, as admin: `start ota` (reply `OK - mac: …`; advertises as `SENSECAP_SOLAR_OTA`).
+3. Within a few metres: `python dfu_cli.py SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip SENSECAP_SOLAR_OTA --wait`
+   (or the MAC from step 2; `--verbose` for detail). If it fails part way, run it again, or use USB.
+
 ### Over USB with the MeshCore web flasher (both boards, easiest)
 
 Chrome or Edge on a computer (Web Serial). At [flasher.meshcore.co.uk](https://flasher.meshcore.co.uk) pick
@@ -73,6 +86,8 @@ Don't use **Erase Flash** unless you mean to wipe the node's identity and settin
 1. Double-press its reset button: the bootloader starts (a USB drive and serial port appear).
 2. `adafruit-nrfutil dfu serial --package SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip -p <port> -b 115200`
    (`pip install adafruit-nrfutil`; `<port>` is COMx on Windows, `/dev/ttyACM0` on Linux).
+   Windows: find the port after the double press (Device Manager > Ports (COM & LPT), or PowerShell
+   `[System.IO.Ports.SerialPort]::GetPortNames()`); the bootloader's COM number can differ from the firmware's.
 
 ### Heltec V4: over the air (Wi-Fi)
 
@@ -90,6 +105,9 @@ For a V4 already running a MeshCore repeater:
   (hold BOOT while plugging in if it doesn't connect). This keeps the saved prefs only if the
   file system partition is untouched; treat it as a first install.
 - Update only: `esptool.py --chip esp32s3 write_flash 0x10000 heltec_v4_repeater-v1.18.0-pces1-update.bin`.
+- Windows: `pip install esptool`, then the same with `python -m esptool --chip esp32s3 --port COM5 …`
+  (the port from Device Manager > Ports (COM & LPT); no driver needed on Windows 10/11).
+- Checksums on Windows: `certutil -hashfile <file> SHA256`, compared with `SHA256SUMS`.
 
 ### After installing: check
 
