@@ -19,9 +19,9 @@ The change: new `src/helpers/LinkStats.{h,cpp}`; hooks in `examples/simple_repea
 
 The release has one download per board, a zip holding `about.txt` (what PCES and this firmware
 are), `install.txt` (the steps below for that board), the images and their `SHA256SUMS`:
-`heltec_v4_repeater-v1.18.0-pces1.zip`, `SenseCap_Solar_repeater-v1.18.0-pces1.zip`. The
-SenseCAP's DFU package is inside as its own `.zip`: hand that one to the DFU app as it is.
-Inside the bundles:
+`<env>-v1.18.0-pces1.zip`. An nRF52 board's DFU package is inside as its own `-ota.zip`: hand
+that one to the DFU tool as it is. Tested on hardware: SenseCAP Solar (2026-11-18). The others are
+built from the same source and not yet tested. Inside the bundles:
 
 | board | file | use |
 |---|---|---|
@@ -29,6 +29,12 @@ Inside the bundles:
 | | `heltec_v4_repeater-v1.18.0-pces1-merged.bin` | first install over USB, whole flash at 0x0 (bootloader, partitions, app) |
 | Seeed SenseCAP Solar (nRF52840) | `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip` | DFU package: BLE OTA (`start ota`) or USB serial DFU; needs SoftDevice S140 7.3.0 |
 | | `SenseCap_Solar_repeater-v1.18.0-pces1.hex` | SWD / J-Link only |
+| Heltec V3 (ESP32-S3, 8 MB) | `Heltec_v3_repeater-v1.18.0-pces1-update.bin`, `-merged.bin` | as the V4 |
+| B&Q Station G2 (ESP32-S3, 16 MB) | `Station_G2_repeater-v1.18.0-pces1-update.bin`, `-merged.bin` | as the V4. Default 7 dBm = about 27 dBm out after its PA; MeshCore caps it at 19 |
+| RAK WisBlock RAK4631 (nRF52840) | `RAK_4631_repeater-v1.18.0-pces1-ota.zip`, `.uf2`, `.hex` | DFU package (BLE OTA `start ota` as `RAK4631_OTA`, or USB serial DFU); `.uf2` drag and drop onto the bootloader drive; needs SoftDevice S140 6.1.1 |
+| Heltec T114, with display (nRF52840) | `Heltec_t114_repeater-v1.18.0-pces1-ota.zip`, `.uf2`, `.hex` | as the RAK4631 (`T114_OTA`) |
+| Heltec T114, without display | `Heltec_t114_without_display_repeater-v1.18.0-pces1-ota.zip`, `.uf2`, `.hex` | as the RAK4631 (`T114_OTA`) |
+| Heltec MeshSolar (nRF52840) | `Heltec_mesh_solar_repeater-v1.18.0-pces1-ota.zip`, `.uf2`, `.hex` | as the RAK4631 (`MESH_SOLAR_OTA`) |
 
 Check a download: `sha256sum -c SHA256SUMS` next to the downloaded files.
 
@@ -133,6 +139,9 @@ Over USB serial, `linkstats` prints every entry with RSSI and sample count.
 ```
 pio run -e heltec_v4_repeater
 pio run -e SenseCap_Solar_repeater
+pio run -e RAK_4631_repeater          # and Heltec_v3_repeater, Heltec_t114_repeater,
+                                      # Heltec_t114_without_display_repeater,
+                                      # Heltec_mesh_solar_repeater, Station_G2_repeater
 ```
 
 Output in `.pio/build/<env>/`: `firmware.bin` (ESP32) or `firmware.zip` / `.hex` (nRF52).
@@ -144,6 +153,11 @@ esptool.py --chip esp32s3 merge_bin -o firmware-merged.bin --flash_mode keep --f
   0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 firmware.bin
 ```
 
+Builds 2026-11-18, batch 1 (RAM / flash used): RAK_4631_repeater 16.3 % / 54.7 %, Heltec_v3_repeater
+19.4 % / 35.3 %, Heltec_t114_repeater 15.5 % / 49.3 %, Heltec_t114_without_display_repeater 15.4 % / 45.4 %,
+Heltec_mesh_solar_repeater 15.0 % / 45.3 %, Station_G2_repeater 23.2 % / 92.6 % (its 1.25 MB app partition).
+nRF52 `.uf2`: `uf2conv.py -c -f 0xADA52840 firmware.hex` (Adafruit nRF52 package); ESP32 merged:
+`esptool merge_bin --flash_mode keep --flash_freq keep --flash_size keep` as above.
 Builds checked 2026-11-18: `heltec_v4_repeater` (flash 18.0 %, RAM 3.0 %), `SenseCap_Solar_repeater`
 (flash 45.6 %, RAM 15.3 %). No warnings from the changed files.
 
