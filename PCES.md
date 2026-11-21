@@ -1,20 +1,36 @@
-# PCES link-stats repeater firmware (MeshCore v1.18.0 + PCES)
+# PCES repeater firmware (MeshCore v1.18.0 + PCES)
 
-Branch `pces-linkstats` of this private repo: official MeshCore v1.18.0
-(`81dbae592ffad40b4212bc0b37e82b38da08f4bc`) plus the PCES link-stats change, for Commsol's Path
-Computation Element Service. Spec: Commsol `docs/pces-link-stats.md`.
+Official MeshCore v1.18.0 (`81dbae592ffad40b4212bc0b37e82b38da08f4bc`) repeater firmware plus two
+measurements for PCES, the Path Computation Element Service (a best-path service for MeshCore, named
+after RFC 4655), on branch `pces-linkstats` of this repo. Specs: [`docs/pces/link-stats.md`](docs/pces/link-stats.md)
+and [`docs/pces/load.md`](docs/pces/load.md).
 
 A repeater with this change measures how well it hears each neighboring repeater from the
 packets it receives anyway (nothing is sent on its own), and answers one anonymous request,
 `0x1C`, when the request arrives direct. It also measures the channel
 load around it (own TX airtime, decoded RX airtime, how often the channel is busy, its TX queue) and
-answers `0x1D` the same way (spec: Commsol `docs/pces-load.md`). Its adverts carry feature 1 = `0xC50C`
+answers `0x1D` the same way. Its adverts carry feature 1 = `0xC50C`
 (`0xC504` with link stats only, `0xC508` with load only). Everything else
 is stock MeshCore v1.18.0 simple_repeater: once it is on air it repeats and adverts like any repeater.
 
-**Status:** link stats running on a SenseCAP Solar since 2026-11-18. Load (2026-11-21): in the release images
-since the 2026-11-21 rebuild (host test passes, not yet tested on a device). From that rebuild `ver` answers
-`v1.18.0-pces1 (Build: 21 Nov 2026)` (`FIRMWARE_VERSION` in simple_repeater `MyMesh.h`); the first images said `v1.18.0`.
+**Status: beta.** Link stats have run on a SenseCAP Solar since 2026-11-18, channel load since 2026-11-21.
+The other boards are built from the same source and not yet tested on hardware. `ver` answers
+`v1.18.0-pces1 (Build: 21 Nov 2026)`.
+
+## Beta testing
+
+Testers welcome, on any of the boards below. What helps most:
+
+- **Your board runs it**: it boots, repeats, adverts, and stays up for days (uptime: `stats-core` over USB serial, or the status
+  page of a MeshCore app).
+- **`linkstats` and `load` look sane** after a day: neighbors you expect, SNRs that match what you know,
+  load shares that make sense for your site.
+- **The update path you used** worked or didn't (phone app, web flasher, OTA over Wi-Fi), with the board
+  and bootloader version (`INFO_UF2.TXT` on nRF52 boards).
+
+Report it as an issue on this repo ("Beta report" template). Nothing is collected from your repeater
+unless someone sends it a direct request; to stop answering, `set pces.linkstats off` and
+`set pces.load off`. To go back to stock, install stock MeshCore v1.18.0 the same way (settings are kept).
 
 The change: new `src/helpers/LinkStats.{h,cpp}` and `src/helpers/LoadStats.{h,cpp}`; hooks in `examples/simple_repeater/MyMesh.{h,cpp}`;
 `CommonCLI::buildAdvertData` gets an optional feature-1 argument. Host tests: `test/pces/test_linkstats.cpp`, `test/pces/test_loadstats.cpp`.
@@ -57,16 +73,16 @@ Check a download: `sha256sum -c SHA256SUMS` next to the downloaded files.
 
 ### Seeed SenseCAP Solar: over the air (BLE), from an iPhone
 
-Tested 2026-11-21 on NH-AUBURN (bootloader 0.9.2-OTAFIX2.2-BP1.3): works.
+Worked on a SenseCAP Solar with bootloader 0.9.2-OTAFIX2.2-BP1.3 (2026-11-21).
 
 1. On the phone: Nordic's **nRF Device Firmware Update** app. In its Settings: **Packet Receipt
    Notifications on, number of packets 8** (the default, off, can outrun the bootloader). Put
    `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip` in Files, as a zip. **Set Auto-Lock to Never** for
    the update: a locked phone stalls it.
-2. On the node, as admin (serial, remote CLI or Commsol > Repeaters > Console): `start ota`
+2. On the node, as admin (USB serial, or a MeshCore app's remote CLI): `start ota`
    (reply `OK - mac: …`; advertises as **`SENSECAP_SOLAR_OTA`**).
 3. In the app: the zip (Distribution packet), the `SENSECAP_SOLAR_OTA` device, **Upload**; phone within
-   a metre, app on screen, about 4 minutes. The LED blinks blue very fast during the transfer.
+   a meter, app on screen, about 4 minutes. The LED blinks blue very fast during the transfer.
 4. If the app loses the node right after it starts (the bootloader may come up on another BLE address,
    OTAFIX issue #63), or the transfer stops: press RST once. With the old image partly erased the
    bootloader comes up in BLE mode by itself (fast blue blink, **`SCAP_DFU`**); pick that device and
@@ -75,17 +91,18 @@ Tested 2026-11-21 on NH-AUBURN (bootloader 0.9.2-OTAFIX2.2-BP1.3): works.
 
 ### Seeed SenseCAP Solar: BLE from a Windows PC (failed here, not recommended)
 
-[nrf_dfu_py](https://github.com/recrof/nrf_dfu_py) / `NordicDFU-Windows-x64.exe` failed twice on
-NH-AUBURN (2026-11-18 and 2026-11-21, PRN 8): the tool reports success, the image in flash is
+[nrf_dfu_py](https://github.com/recrof/nrf_dfu_py) / `NordicDFU-Windows-x64.exe` failed twice on a
+SenseCAP Solar (2026-11-18 and 2026-11-21, PRN 8): the tool reports success, the image in flash is
 byte-identical to `firmware.bin` (read back from `CURRENT.UF2`), yet the node stays in the bootloader
 (fast blue blink, `SCAP_DFU`). The bootloader's "valid app" flag in its settings page (0xFF000) was
 not written. In OTA mode OTAFIX 2.2 erases that page and writes it again as two SoftDevice flash
 operations after the disconnect; a reset between them leaves it blank. Suspected, not proven: the
 bootloader's disconnect handler (`dfu_transport_ble.c`, `sd_ble_gatts_sys_attr_get` under
-`APP_ERROR_CHECK`) resets when the Windows client left no system attributes. Recovery: USB (below);
+`APP_ERROR_CHECK`) resets when the Windows client left no system attributes (reported:
+[OTAFIX #64](https://github.com/oltaco/Adafruit_nRF52_Bootloader_OTAFIX/issues/64)). Recovery: USB (below);
 settings and identity are kept.
 
-Holding the user button while pressing RST did not enter BLE DFU mode on this node (the bootloader
+Holding the user button while pressing RST did not enter BLE DFU mode on our node (the bootloader
 reads P1.01); use `start ota`.
 
 ### Over USB with the MeshCore web flasher (both boards, easiest)
@@ -137,7 +154,7 @@ For a V4 already running a MeshCore repeater:
 | `get pces.linkstats` | `> on` |
 | `get pces.load` | `> on` |
 | `get freq`, `get radio`, `get tx` | your mesh's settings (set them if a first install) |
-| `linkstats` | `0 links` at first; neighbours appear as packets are heard (relayed floods, zero-hop repeater adverts) |
+| `linkstats` | `0 links` at first; neighbors appear as packets are heard (relayed floods, zero-hop repeater adverts) |
 
 ## CLI (admin, on the repeater)
 
@@ -183,17 +200,11 @@ esptool.py --chip esp32s3 merge_bin -o firmware-merged.bin --flash_mode keep --f
   0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 firmware.bin
 ```
 
-Builds 2026-11-18, batch 1 (RAM / flash used): RAK_4631_repeater 16.3 % / 54.7 %, Heltec_v3_repeater
-19.4 % / 35.3 %, Heltec_t114_repeater 15.5 % / 49.3 %, Heltec_t114_without_display_repeater 15.4 % / 45.4 %,
-Heltec_mesh_solar_repeater 15.0 % / 45.3 %, Station_G2_repeater 23.2 % / 92.6 % (its 1.25 MB app partition).
-nRF52 `.uf2`: `uf2conv.py -c -f 0xADA52840 firmware.hex` (Adafruit nRF52 package); ESP32 merged:
-`esptool merge_bin --flash_mode keep --flash_freq keep --flash_size keep` as above.
-Builds checked 2026-11-18: `heltec_v4_repeater` (flash 18.0 %, RAM 3.0 %), `SenseCap_Solar_repeater`
-(flash 45.6 %, RAM 15.3 %). No warnings from the changed files.
-With load (2026-11-21): `heltec_v4_repeater` flash 18.0 %, RAM 3.3 %; `SenseCap_Solar_repeater` flash 46.3 %,
-RAM 17.2 %; RAK_4631_repeater 18.2 % / 55.3 % (RAM / flash), Heltec_v3_repeater 20.8 % / 35.4 %,
-Heltec_t114_repeater 17.4 % / 50.0 %, Heltec_t114_without_display_repeater 17.3 % / 46.1 %,
-Heltec_mesh_solar_repeater 17.0 % / 46.0 %, Station_G2_repeater 24.5 % / 92.9 %. No warnings.
+nRF52 `.uf2`: `uf2conv.py -c -f 0xADA52840 firmware.hex` (Adafruit nRF52 package).
+
+Flash used (2026-11-21): SenseCAP Solar 46.5 %, RAK4631 55.5 %, T114 50.2 % / 46.3 % (without display),
+MeshSolar 46.2 %, Heltec V3 35.5 %, Heltec V4 18.1 %, Station G2 93.0 % (of its 1.25 MB app partition).
+RAM for the additions: about 1 KB (link stats) + 3.4 KB (load). No compiler warnings from the changed files.
 
 ## New MeshCore release
 

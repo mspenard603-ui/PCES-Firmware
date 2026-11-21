@@ -1,0 +1,68 @@
+name: Beta report
+description: How the PCES repeater firmware runs on your board (works, problems, install notes).
+title: "[beta] <board>: <works / problem>"
+labels: ["beta report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Short is fine: a "works on my board" report helps too.
+        Please don't paste passwords or private keys.
+  - type: dropdown
+    id: board
+    attributes:
+      label: Board
+      options:
+        - Heltec V4
+        - Heltec V3
+        - Heltec T114 (with display)
+        - Heltec T114 (without display)
+        - Heltec MeshSolar
+        - RAK WisBlock RAK4631
+        - Seeed SenseCAP Solar
+        - B&Q Station G2
+        - Other (say below)
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Works, with a problem
+        - Doesn't work
+    validations:
+      required: true
+  - type: input
+    id: ver
+    attributes:
+      label: "`ver` output"
+      placeholder: "v1.18.0-pces1 (Build: 21 Nov 2026)"
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - Phone app over Bluetooth (nRF Device Firmware Update)
+        - Over Wi-Fi (start ota, web page)
+        - MeshCore web flasher over USB
+        - Command line over USB (adafruit-nrfutil / esptool)
+        - UF2 drag and drop
+        - Other (say below)
+  - type: input
+    id: bootloader
+    attributes:
+      label: Bootloader (nRF52 boards)
+      description: First line of INFO_UF2.TXT on the bootloader drive (double-press reset), if you have it.
+  - type: textarea
+    id: output
+    attributes:
+      label: "`linkstats` and `load` output"
+      description: After the repeater has run a while (a day is best). USB serial output has more detail.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: What happened
+      description: Problems, reboots, odd values, install trouble. Uptime and roughly how busy your mesh is help.

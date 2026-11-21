@@ -1,3 +1,25 @@
+> ## PCES repeater firmware (beta)
+>
+> This repo is **official MeshCore v1.18.0** plus two measurements for PCES, the Path Computation
+> Element Service (a best-path service for MeshCore): a repeater measures how well it hears each
+> neighboring repeater, and how busy its channel is. It **sends nothing on its own**; it answers one
+> small anonymous request, only when the request comes direct. Everything else is stock MeshCore:
+> it repeats, adverts and takes CLI commands like any repeater, and keeps its settings when you
+> update.
+>
+> - **Download:** [release v1.18.0-pces1](https://github.com/mspenard603-ui/PCES-Firmware/releases/tag/v1.18.0-pces1):
+>   one zip per board (Heltec V3, V4, T114, MeshSolar; RAK4631; SenseCAP Solar; Station G2), with
+>   `install.txt` for that board.
+> - **What it is, install, CLI:** [PCES.md](PCES.md). **Specs:** [link stats](docs/pces/link-stats.md),
+>   [channel load](docs/pces/load.md).
+> - **Beta testers wanted:** tell us how it runs on your board:
+>   [open a beta report](https://github.com/mspenard603-ui/PCES-Firmware/issues/new?template=beta-report.yml).
+> - **Off switch:** `set pces.linkstats off`, `set pces.load off`. **Back to stock:** install stock
+>   MeshCore v1.18.0 the same way.
+>
+> The source is on branch `pces-linkstats`; `git diff 81dbae5 pces-linkstats` shows every change.
+> The rest of this README is MeshCore's own.
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
