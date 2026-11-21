@@ -37,6 +37,7 @@
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 #include <helpers/LinkStats.h>
+#include <helpers/LoadStats.h>
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -68,11 +69,11 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "15 Oct 2026"
+  #define FIRMWARE_BUILD_DATE   "21 Nov 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.18.0"
+  #define FIRMWARE_VERSION   "v1.18.0-pces1"   // PCES: tells it apart from stock v1.18.0 in `ver`
 #endif
 
 #define FIRMWARE_ROLE "repeater"
@@ -106,6 +107,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #endif
   LinkStats link_stats;      // PCES link statistics (Commsol docs/pces-link-stats.md)
   bool link_stats_on;
+  LoadStats load_stats;      // PCES channel load (Commsol docs/pces-load.md)
+  bool load_on;
+  unsigned long next_busy_sample, last_load_tick;
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
   float pending_freq;
@@ -128,6 +132,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4);
   void sampleLinkStats(const mesh::Packet* pkt);
   void formatLinkStats(char* reply, int offset, bool serial);
+  uint8_t handleAnonLoadReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len);
+  void sampleLoad();
+  void formatLoad(char* reply, bool serial);
+  uint16_t pcesFeat1() const;
   void loadLinkStatsPref();
   void saveLinkStatsPref();
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);

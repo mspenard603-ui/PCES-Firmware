@@ -4,15 +4,20 @@ Branch `pces-linkstats` of this private repo: official MeshCore v1.18.0
 (`81dbae592ffad40b4212bc0b37e82b38da08f4bc`) plus the PCES link-stats change, for Commsol's Path
 Computation Element Service. Spec: Commsol `docs/pces-link-stats.md`.
 
-A repeater with this change measures how well it hears each neighbouring repeater from the
+A repeater with this change measures how well it hears each neighboring repeater from the
 packets it receives anyway (nothing is sent on its own), and answers one anonymous request,
-`0x1C`, when the request arrives direct. Its adverts carry feature 1 = `0xC504`. Everything else
+`0x1C`, when the request arrives direct. It also measures the channel
+load around it (own TX airtime, decoded RX airtime, how often the channel is busy, its TX queue) and
+answers `0x1D` the same way (spec: Commsol `docs/pces-load.md`). Its adverts carry feature 1 = `0xC50C`
+(`0xC504` with link stats only, `0xC508` with load only). Everything else
 is stock MeshCore v1.18.0 simple_repeater: once it is on air it repeats and adverts like any repeater.
 
-**Status (2026-11-18): built, not flashed or tested on any device yet.**
+**Status:** link stats running on a SenseCAP Solar since 2026-11-18. Load (2026-11-21): in the release images
+since the 2026-11-21 rebuild (host test passes, not yet tested on a device). From that rebuild `ver` answers
+`v1.18.0-pces1 (Build: 21 Nov 2026)` (`FIRMWARE_VERSION` in simple_repeater `MyMesh.h`); the first images said `v1.18.0`.
 
-The change: new `src/helpers/LinkStats.{h,cpp}`; hooks in `examples/simple_repeater/MyMesh.{h,cpp}`;
-`CommonCLI::buildAdvertData` gets an optional feature-1 argument. Host test: `test/pces/test_linkstats.cpp`.
+The change: new `src/helpers/LinkStats.{h,cpp}` and `src/helpers/LoadStats.{h,cpp}`; hooks in `examples/simple_repeater/MyMesh.{h,cpp}`;
+`CommonCLI::buildAdvertData` gets an optional feature-1 argument. Host tests: `test/pces/test_linkstats.cpp`, `test/pces/test_loadstats.cpp`.
 `git diff 81dbae5 pces-linkstats` shows all of it.
 
 ## Images (GitHub release `v1.18.0-pces1` of this repo)
@@ -27,7 +32,7 @@ built from the same source and not yet tested. Inside the bundles:
 |---|---|---|
 | Heltec V4 (ESP32-S3, 16 MB) | `heltec_v4_repeater-v1.18.0-pces1-update.bin` | update an existing MeshCore repeater (OTA web page, or USB at 0x10000) |
 | | `heltec_v4_repeater-v1.18.0-pces1-merged.bin` | first install over USB, whole flash at 0x0 (bootloader, partitions, app) |
-| Seeed SenseCAP Solar (nRF52840) | `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip` | DFU package: BLE OTA (`start ota`) or USB serial DFU; needs SoftDevice S140 7.3.0 |
+| Seeed SenseCAP Solar (nRF52840) | `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip` | DFU package: BLE OTA (`start ota`, iPhone nRF DFU app) or USB serial DFU; needs SoftDevice S140 7.3.0 |
 | | `SenseCap_Solar_repeater-v1.18.0-pces1.hex` | SWD / J-Link only |
 | Heltec V3 (ESP32-S3, 8 MB) | `Heltec_v3_repeater-v1.18.0-pces1-update.bin`, `-merged.bin` | as the V4 |
 | B&Q Station G2 (ESP32-S3, 16 MB) | `Station_G2_repeater-v1.18.0-pces1-update.bin`, `-merged.bin` | as the V4. Default 7 dBm = about 27 dBm out after its PA; MeshCore caps it at 19 |
@@ -50,29 +55,38 @@ Check a download: `sha256sum -c SHA256SUMS` next to the downloaded files.
 - **Keep a stock image** for the board, to go back to: MeshCore v1.18.0 from
   [flasher.meshcore.co.uk](https://flasher.meshcore.co.uk) or the MeshCore releases.
 
-### Seeed SenseCAP Solar: over the air (BLE)
+### Seeed SenseCAP Solar: over the air (BLE), from an iPhone
 
-For a node already running a MeshCore repeater (with the OTA-capable bootloader):
+Tested 2026-11-21 on NH-AUBURN (bootloader 0.9.2-OTAFIX2.2-BP1.3): works.
 
-1. Log in to it as admin (any MeshCore app with its remote CLI, or Commsol > Repeaters > Console).
-2. Send `start ota`. The node starts advertising over Bluetooth as **`SENSECAP_SOLAR_OTA`**.
-3. On a phone, open Nordic's **nRF DFU** app (or **nRF Connect** > DFU), pick
-   `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip`, then the `SENSECAP_SOLAR_OTA` device. Wait for
-   it to finish and restart (a minute or two). Stay within a few metres: it is Bluetooth.
-4. Log in again and check (below).
+1. On the phone: Nordic's **nRF Device Firmware Update** app. In its Settings: **Packet Receipt
+   Notifications on, number of packets 8** (the default, off, can outrun the bootloader). Put
+   `SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip` in Files, as a zip. **Set Auto-Lock to Never** for
+   the update: a locked phone stalls it.
+2. On the node, as admin (serial, remote CLI or Commsol > Repeaters > Console): `start ota`
+   (reply `OK - mac: …`; advertises as **`SENSECAP_SOLAR_OTA`**).
+3. In the app: the zip (Distribution packet), the `SENSECAP_SOLAR_OTA` device, **Upload**; phone within
+   a metre, app on screen, about 4 minutes. The LED blinks blue very fast during the transfer.
+4. If the app loses the node right after it starts (the bootloader may come up on another BLE address,
+   OTAFIX issue #63), or the transfer stops: press RST once. With the old image partly erased the
+   bootloader comes up in BLE mode by itself (fast blue blink, **`SCAP_DFU`**); pick that device and
+   Upload again.
+5. Afterwards: slow blue blink, then check (below).
 
-### Seeed SenseCAP Solar: over the air (BLE), from a Windows PC
+### Seeed SenseCAP Solar: BLE from a Windows PC (failed here, not recommended)
 
-Nordic's `nrfutil dfu ble` does not fit: it speaks Secure DFU only and needs a Nordic dongle, while the
-board's Adafruit bootloader speaks Legacy DFU. Use [nrf_dfu_py](https://github.com/recrof/nrf_dfu_py)
-(Legacy DFU over the PC's own Bluetooth via bleak; tested by its author on XIAO nRF52). Not yet tried
-with this build: keep USB as the fallback.
+[nrf_dfu_py](https://github.com/recrof/nrf_dfu_py) / `NordicDFU-Windows-x64.exe` failed twice on
+NH-AUBURN (2026-11-18 and 2026-11-21, PRN 8): the tool reports success, the image in flash is
+byte-identical to `firmware.bin` (read back from `CURRENT.UF2`), yet the node stays in the bootloader
+(fast blue blink, `SCAP_DFU`). The bootloader's "valid app" flag in its settings page (0xFF000) was
+not written. In OTA mode OTAFIX 2.2 erases that page and writes it again as two SoftDevice flash
+operations after the disconnect; a reset between them leaves it blank. Suspected, not proven: the
+bootloader's disconnect handler (`dfu_transport_ble.c`, `sd_ble_gatts_sys_attr_get` under
+`APP_ERROR_CHECK`) resets when the Windows client left no system attributes. Recovery: USB (below);
+settings and identity are kept.
 
-1. Python 3.9+ (python.org, "Add python.exe to PATH"); `git clone https://github.com/recrof/nrf_dfu_py`,
-   `cd nrf_dfu_py`, `pip install bleak`. Or its release `NordicDFU-Windows-x64.exe` (the same in a window).
-2. On the node, as admin: `start ota` (reply `OK - mac: …`; advertises as `SENSECAP_SOLAR_OTA`).
-3. Within a few metres: `python dfu_cli.py SenseCap_Solar_repeater-v1.18.0-pces1-ota.zip SENSECAP_SOLAR_OTA --wait`
-   (or the MAC from step 2; `--verbose` for detail). If it fails part way, run it again, or use USB.
+Holding the user button while pressing RST did not enter BLE DFU mode on this node (the bootloader
+reads P1.01); use `start ota`.
 
 ### Over USB with the MeshCore web flasher (both boards, easiest)
 
@@ -119,8 +133,9 @@ For a V4 already running a MeshCore repeater:
 
 | command | expect |
 |---|---|
-| `ver` | `v1.18.0` |
+| `ver` | `v1.18.0-pces1 (Build: 21 Nov 2026)` (images before 2026-11-21: `v1.18.0`) |
 | `get pces.linkstats` | `> on` |
+| `get pces.load` | `> on` |
 | `get freq`, `get radio`, `get tx` | your mesh's settings (set them if a first install) |
 | `linkstats` | `0 links` at first; neighbours appear as packets are heard (relayed floods, zero-hop repeater adverts) |
 
@@ -129,10 +144,25 @@ For a V4 already running a MeshCore repeater:
 | command | |
 |---|---|
 | `get pces.linkstats` / `set pces.linkstats on\|off` | default on; off: no samples, no answers, no marker (from the next advert). Saved in `/pces_ls` |
-| `linkstats [N]` | the table, highest weight first, from entry N: `key snr/sd wW age`; `key?` = a hash shared by several neighbours, or not heard advertising |
+| `linkstats [N]` | the table, highest weight first, from entry N: `key snr/sd wW age`; `key?` = a hash not resolved yet (the neighbor not heard advertising since the restart, or a hash several share). Over the air the first line is a legend (`N links: key SNR/sd dB, w=weight, age`) and about 4 rows fit; a last line `more: linkstats N` gives the command for the rest |
 | `linkstats clear` | empty the table |
+| `get pces.load` / `set pces.load on\|off` | default on; off: no sampling, no answers to `0x1D`, marker bit `0x0008` off (from the next advert). Saved in `/pces_ls` (2nd byte; a 1-byte file from a build without load reads as on) |
+| `load` | percent of time spent on TX / RX (decoded) / channel busy, then queue avg/max, for `1m` `15m` `1h` `24h` and `peak-Nh` (the busiest complete hour of the day, N hours ago) |
+| `load clear` | empty the load history |
 
-Over USB serial, `linkstats` prints every entry with RSSI and sample count.
+Over USB serial, `linkstats` prints every entry with RSSI and sample count, and `load` adds the
+held-by-airtime-budget share and the packet counts (rx, tx, flood, dup, err) per window.
+
+Load sampling: the RSSI is read 20 times a second while the radio is receiving (never while it
+transmits, nor before the noise floor is calibrated) and counts as busy above the noise floor + 6 dB.
+A LoRa packet weaker than that (SNR below about +5 dB) doesn't register as busy; the decoded RX share
+covers those it decodes. One minute is kept per bucket for the last hour, one hour for the last day:
+about 3.4 kB of RAM. Nothing is sent.
+
+Battery: no wake-ups are added. With `powersaving` off (the default) the MCU runs its loop
+continuously and the radio receives continuously anyway; the RSSI reads add about 1 ms of SPI work a
+second. With `powersaving on` the MCU sleeps between radio events: busy is then not sampled (its
+share reads "-", answer flag bit 3), the counter-based shares (TX, RX, queue, counts) still are.
 
 ## Build
 
@@ -160,6 +190,10 @@ nRF52 `.uf2`: `uf2conv.py -c -f 0xADA52840 firmware.hex` (Adafruit nRF52 package
 `esptool merge_bin --flash_mode keep --flash_freq keep --flash_size keep` as above.
 Builds checked 2026-11-18: `heltec_v4_repeater` (flash 18.0 %, RAM 3.0 %), `SenseCap_Solar_repeater`
 (flash 45.6 %, RAM 15.3 %). No warnings from the changed files.
+With load (2026-11-21): `heltec_v4_repeater` flash 18.0 %, RAM 3.3 %; `SenseCap_Solar_repeater` flash 46.3 %,
+RAM 17.2 %; RAK_4631_repeater 18.2 % / 55.3 % (RAM / flash), Heltec_v3_repeater 20.8 % / 35.4 %,
+Heltec_t114_repeater 17.4 % / 50.0 %, Heltec_t114_without_display_repeater 17.3 % / 46.1 %,
+Heltec_mesh_solar_repeater 17.0 % / 46.0 %, Station_G2_repeater 24.5 % / 92.9 %. No warnings.
 
 ## New MeshCore release
 
@@ -170,4 +204,5 @@ host test, check on a bench node, then a new release (`<version>-pces1`).
 
 ```
 g++ -std=c++17 -I src/helpers -o /tmp/t test/pces/test_linkstats.cpp src/helpers/LinkStats.cpp && /tmp/t
+g++ -std=c++17 -I src/helpers -o /tmp/tl test/pces/test_loadstats.cpp src/helpers/LoadStats.cpp && /tmp/tl
 ```

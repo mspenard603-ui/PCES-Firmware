@@ -24,14 +24,73 @@ int LinkStats::count() const {
   return n;
 }
 
-LinkStatEntry* LinkStats::find(const uint8_t* key, uint8_t len, uint8_t kind) {
+int LinkStats::keyLen(const LinkStatEntry& e) {
+  return (e.kind & LINK_KIND_RESOLVED) ? 4 : (e.kind & LINK_KIND_WIDTH_MASK) + 1;
+}
+
+// One neighbor can be heard under several keys: its 1-, 2- or 3-byte path hash (whatever hash
+// width the packet's sender used) and, once resolved, its public key prefix. A key that extends
+// another (F7C3 extends F7, F7C3A1B2 extends F7C3) is taken as the same neighbor when nothing
+// else in the table extends the shorter one.
+LinkStatEntry* LinkStats::target(const uint8_t* k, uint8_t len, bool resolved) {
+  LinkStatEntry* exact = NULL;
+  LinkStatEntry* wide = NULL;     // an entry with a longer key that extends k
+  int n_wide = 0;
+  LinkStatEntry* narrow = NULL;   // the longest unresolved entry that k extends
   for (int i = 0; i < MAX_LINK_STATS; i++) {
     LinkStatEntry* e = &_e[i];
     if (!e->t_last) continue;
-    if ((e->kind & (LINK_KIND_RESOLVED | LINK_KIND_WIDTH_MASK)) != (kind & (LINK_KIND_RESOLVED | LINK_KIND_WIDTH_MASK))) continue;
-    if (memcmp(e->key, key, len) == 0) return e;
+    uint8_t el = keyLen(*e);
+    bool er = (e->kind & LINK_KIND_RESOLVED) != 0;
+    if (el == len && er == resolved && memcmp(e->key, k, len) == 0) exact = e;
+    if (el > len && memcmp(e->key, k, len) == 0) { wide = e; n_wide++; }
+    else if (el < len && !er && memcmp(e->key, k, el) == 0 && (narrow == NULL || el > keyLen(*narrow))) narrow = e;
+  }
+  if (n_wide == 1) return wide;   // absorb() then folds a shorter entry for the same hash into it
+  if (exact) return exact;         // several longer ones: the short hash is ambiguous, kept apart
+  if (n_wide == 0 && narrow) {   // the neighbor is now heard with a longer key: keep its history
+    memset(narrow->key, 0, 4);
+    memcpy(narrow->key, k, len);
+    narrow->kind = (resolved ? LINK_KIND_RESOLVED : (uint8_t)(len - 1)) | (narrow->kind & LINK_KIND_ADVERT_ONLY);
+    return narrow;
   }
   return NULL;
+}
+
+// Shorter unresolved entries that e is the only extension of: fold them into e.
+void LinkStats::absorb(LinkStatEntry* e, uint32_t now) {
+  uint8_t el = keyLen(*e);
+  for (int i = 0; i < MAX_LINK_STATS; i++) {
+    LinkStatEntry* u = &_e[i];
+    if (u == e || !u->t_last || (u->kind & LINK_KIND_RESOLVED)) continue;
+    uint8_t ul = keyLen(*u);
+    if (ul >= el || memcmp(u->key, e->key, ul) != 0) continue;
+    bool other = false;
+    for (int j = 0; j < MAX_LINK_STATS && !other; j++) {
+      const LinkStatEntry* o = &_e[j];
+      if (o == e || o == u || !o->t_last) continue;
+      other = keyLen(*o) > ul && memcmp(o->key, u->key, ul) == 0;
+    }
+    if (other) continue;
+    // both aged to now, then pooled (weighted mean; sums of squares plus the between-means term)
+    float de = exp2f(-(float)(now > e->t_last ? now - e->t_last : 0) / (float)LINK_STATS_HALF_LIFE_SECS);
+    float du = exp2f(-(float)(now > u->t_last ? now - u->t_last : 0) / (float)LINK_STATS_HALF_LIFE_SECS);
+    float we = e->w * de, wu = u->w * du, w = we + wu;
+    if (w > 0.0f) {
+      float dm = e->mean - u->mean;
+      e->s = e->s * de + u->s * du + we * wu / w * dm * dm;
+      e->mean = (we * e->mean + wu * u->mean) / w;
+    }
+    e->w = w;
+    float wre = e->wr * de, wru = u->wr * du;
+    if (wre + wru > 0.0f) e->rssi = (wre * e->rssi + wru * u->rssi) / (wre + wru);
+    e->wr = wre + wru;
+    if (!(u->kind & LINK_KIND_ADVERT_ONLY)) e->kind &= ~LINK_KIND_ADVERT_ONLY;
+    uint32_t n = (uint32_t)e->n + u->n;
+    e->n = n > 0xFFFF ? 0xFFFF : (uint16_t)n;
+    e->t_last = now;
+    memset(u, 0, sizeof(*u));
+  }
 }
 
 LinkStatEntry* LinkStats::slotFor(uint32_t now) {
@@ -62,7 +121,8 @@ void LinkStats::sample(const uint8_t* key, uint8_t key_len, bool resolved, bool 
   }
   memcpy(k, key, len);
 
-  LinkStatEntry* e = find(k, resolved ? 4 : len, kind);
+  if (resolved) len = 4;
+  LinkStatEntry* e = target(k, len, resolved);
   if (e == NULL) {
     e = slotFor(now);
     memset(e, 0, sizeof(*e));
@@ -88,6 +148,7 @@ void LinkStats::sample(const uint8_t* key, uint8_t key_len, bool resolved, bool 
   }
   e->t_last = now;
   if (e->n < 0xFFFF) e->n++;
+  absorb(e, now);
 }
 
 int LinkStats::sorted(const LinkStatEntry** out, int max, uint32_t now) const {

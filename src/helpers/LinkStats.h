@@ -34,7 +34,9 @@ class LinkStats {
   LinkStatEntry _e[MAX_LINK_STATS];
   bool _was_full;
 
-  LinkStatEntry* find(const uint8_t* key, uint8_t len, uint8_t kind);
+  static int keyLen(const LinkStatEntry& e);
+  LinkStatEntry* target(const uint8_t* k, uint8_t len, bool resolved);
+  void absorb(LinkStatEntry* e, uint32_t now);
   LinkStatEntry* slotFor(uint32_t now);
 public:
   LinkStats() { clear(); }

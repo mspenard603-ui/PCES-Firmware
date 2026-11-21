@@ -56,8 +56,13 @@
 #define ANON_REQ_TYPE_OWNER        0x02
 #define ANON_REQ_TYPE_BASIC        0x03   // just remote clock
 #define ANON_REQ_TYPE_LINK_STATS   0x1C   // PCES link statistics (provisional; must stay below 0x20, see onAnonDataRecv)
+#define ANON_REQ_TYPE_LOAD         0x1D   // PCES channel load (provisional; Commsol docs/pces-load.md)
 
-#define PCES_FEAT1_LINK_STATS      0xC504 // advert feature 1: Commsol/PCES family 0xC5xx, bit 2 = answers link stats
+#define PCES_FEAT1_FAMILY          0xC500 // advert feature 1: Commsol/PCES family 0xC5xx
+#define PCES_FEAT1_LINK_STATS      0x0004 // bit 2: answers link stats (0x1C)
+#define PCES_FEAT1_LOAD            0x0008 // bit 3: answers channel load (0x1D)
+#define LOAD_BUSY_SAMPLE_MS        50     // RSSI reading while receiving, 20 a second
+#define LOAD_BUSY_DB               6      // busy: RSSI more than this above the noise floor
 #define LINK_STATS_PREF_FILE       "/pces_ls"
 #define LINK_STATS_MAX_REPLY       167    // MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1)
 
@@ -261,21 +266,27 @@ void MyMesh::formatLinkStats(char* reply, int offset, bool serial) {
     reply[0] = 0;
     return;
   }
-  int pos = sprintf(reply, "%d links%s", n, offset ? "" : " (linkstats N: from N)");
-  for (int i = offset; i < n; i++) {
+  // "N links" and a legend, one line per entry from `offset`; when they don't all fit, the last line says how to
+  // list the rest: "more: linkstats <next>".
+  int pos = sprintf(reply, "%d links: key SNR/sd dB, w=weight, age", n);
+  int i = offset;
+  for (; i < n; i++) {
     const LinkStatEntry& e = *list[i];
     char line[48], k[12] = "", m[12], d[12], a[12];
     fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
     fmtAge(a, now > e.t_last ? now - e.t_last : 0);
     int len = sprintf(line, "\n%s %s/%s w%d %s", k, m, d, (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), a);
-    if (pos + len > 150) break;
+    int room = i + 1 < n ? 150 - 20 : 150;   // keep room for the "more" line unless this is the last
+    if (pos + len > room) break;
     strcpy(&reply[pos], line);
     pos += len;
   }
+  if (i < n) sprintf(&reply[pos], "\nmore: linkstats %d", i);
 }
 
 void MyMesh::loadLinkStatsPref() {
   link_stats_on = true;   // default: flashing this firmware is the opt-in
+  load_on = true;
   if (_fs->exists(LINK_STATS_PREF_FILE)) {
 #if defined(RP2040_PLATFORM)
     File f = _fs->open(LINK_STATS_PREF_FILE, "r");
@@ -283,8 +294,10 @@ void MyMesh::loadLinkStatsPref() {
     File f = _fs->open(LINK_STATS_PREF_FILE);
 #endif
     if (f) {
-      uint8_t v = 1;
-      if (f.read(&v, 1) == 1) link_stats_on = v != 0;
+      uint8_t v[2] = { 1, 1 };   // [link stats][load]; a 1-byte file (link stats only): load on
+      int n = f.read(v, 2);
+      if (n >= 1) link_stats_on = v[0] != 0;
+      if (n >= 2) load_on = v[1] != 0;
       f.close();
     }
   }
@@ -300,10 +313,142 @@ void MyMesh::saveLinkStatsPref() {
   File f = _fs->open(LINK_STATS_PREF_FILE, "w", true);
 #endif
   if (f) {
-    uint8_t v = link_stats_on ? 1 : 0;
-    f.write(&v, 1);
+    uint8_t v[2] = { (uint8_t)(link_stats_on ? 1 : 0), (uint8_t)(load_on ? 1 : 0) };
+    f.write(v, 2);
     f.close();
   }
+}
+
+// PCES channel load (Commsol docs/pces-load.md). Request data after the sub-type:
+// {reply-path-len}{reply-path}{version=1}
+uint8_t MyMesh::handleAnonLoadReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len) {
+  if (!anon_limiter.allow(rtc_clock.getCurrentTime())) return 0;
+  if (len < 1) return 0;
+  reply_path_len = *data++; len--;
+  if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
+  size_t path_bytes = mesh::Packet::writePath(reply_path, data, reply_path_len);
+  if (len < path_bytes + 1) return 0;
+  data += path_bytes;
+  if (data[0] != 1) return 0;   // version
+
+  memcpy(reply_data, &sender_timestamp, 4);   // prefix with sender_timestamp, like a tag
+  uint32_t now = getRTCClock()->getCurrentTime();
+  memcpy(&reply_data[4], &now, 4);
+  int i = 8;
+  int nf = _radio->getNoiseFloor();
+  reply_data[i++] = 1;   // version
+  reply_data[i++] = 0x01 | (nf != 0 && !_prefs.powersaving_enabled ? 0x02 : 0)
+                  | ((_prefs.interference_threshold > 0 || _prefs.cad_enabled) ? 0x04 : 0)
+                  | (_prefs.powersaving_enabled ? 0x08 : 0);
+  reply_data[i++] = (uint8_t)(int8_t)(nf < -128 ? -128 : nf > 127 ? 127 : nf);
+  reply_data[i++] = LOAD_BUSY_DB;
+  float af = _prefs.airtime_factor * 10.0f;
+  reply_data[i++] = af <= 0 ? 0 : af >= 255 ? 255 : (uint8_t)lroundf(af);
+  uint32_t up_h = (uint32_t)(uptime_millis / 3600000ULL);
+  uint16_t up = up_h > 65535 ? 65535 : (uint16_t)up_h;
+  memcpy(&reply_data[i], &up, 2); i += 2;
+  int q = _mgr->getOutboundTotal(), fr = _mgr->getFreeCount();
+  reply_data[i++] = q > 255 ? 255 : (uint8_t)q;
+  reply_data[i++] = fr > 255 ? 255 : (uint8_t)fr;
+  uint8_t* ago_pos = &reply_data[i++];
+  *ago_pos = 0xFF;
+
+  LoadBucket b;
+  static const int mins[3] = { 1, 15, 60 };
+  for (int k = 0; k < 3; k++) {
+    bool ok = load_stats.window(mins[k], &b);
+    i += LoadStats::encodeWindow(&reply_data[i], b, ok);
+  }
+  bool ok = load_stats.day(&b);
+  i += LoadStats::encodeWindow(&reply_data[i], b, ok);
+  uint8_t ago = 0;
+  ok = load_stats.peak(&b, &ago);
+  if (ok) *ago_pos = ago;
+  i += LoadStats::encodeWindow(&reply_data[i], b, ok);
+  return i;   // 18 + 5 x 22 = 128 bytes
+}
+
+// Called from loop(): RSSI busy samples while receiving, and once a second the counters.
+// Adds no wake-ups: with power saving on the MCU sleeps between radio events, so the loop runs
+// mostly right after a packet and busy samples would be biased; they are skipped then (counters only).
+void MyMesh::sampleLoad() {
+  if (!load_on) return;
+  unsigned long now = _ms->getMillis();
+  if ((long)(now - next_busy_sample) >= 0) {
+    next_busy_sample = now + LOAD_BUSY_SAMPLE_MS;
+    int nf = _radio->getNoiseFloor();
+    if (nf != 0 && !_prefs.powersaving_enabled && radio_driver.isInRecvMode()) {   // not while transmitting; not before the floor is known
+      load_stats.busySample(radio_driver.getCurrentRSSI() > nf + LOAD_BUSY_DB);
+    }
+  }
+  uint32_t el = (uint32_t)(now - last_load_tick) / 1000;
+  if (el >= 1) {
+    last_load_tick += el * 1000;
+    LoadCounters c;
+    c.tx_ms = getTotalAirTime();
+    c.rx_ms = getReceiveAirTime();
+    c.n_rx = radio_driver.getPacketsRecv();
+    c.n_tx = radio_driver.getPacketsSent();
+    c.n_flood = getNumRecvFlood();
+    c.n_dup = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+    c.n_err = radio_driver.getPacketsRecvErrors();
+    int q = _mgr->getOutboundTotal();
+    bool held = _mgr->getOutboundCount(now) > 0
+             && getRemainingTxBudget() < _radio->getEstAirtimeFor(MAX_TRANS_UNIT) / 2;
+    load_stats.tick(el, c, q > 255 ? 255 : (uint8_t)q, held);
+  }
+}
+
+uint16_t MyMesh::pcesFeat1() const {
+  uint16_t bits = (link_stats_on ? PCES_FEAT1_LINK_STATS : 0) | (load_on ? PCES_FEAT1_LOAD : 0);
+  return bits ? (PCES_FEAT1_FAMILY | bits) : 0;
+}
+
+static void fmtPct(char* out, uint16_t permille) {   // one decimal, from permille; "-" when not measured
+  if (permille == 0xFFFF) { strcpy(out, "-"); return; }
+  sprintf(out, "%u.%u", (uint32_t)(permille / 10), (uint32_t)(permille % 10));
+}
+
+// CLI "load": TX / RX / busy shares (%) and the TX queue for 1 min, 15 min, 1 h, 24 h and the
+// busiest hour of the day. Remote: short lines. Serial: counts as well.
+void MyMesh::formatLoad(char* reply, bool serial) {
+  if (!load_on) { strcpy(reply, "load off (set pces.load on)"); return; }
+  static const char* names[5] = { "1m", "15m", "1h", "24h", "peak" };
+  static const int mins[3] = { 1, 15, 60 };
+  int pos = 0;
+  if (serial) {
+    Serial.printf("load: noise floor %d dBm, busy above +%d dB, %d min / %d h kept, queue %d\n",
+                  _radio->getNoiseFloor(), LOAD_BUSY_DB, load_stats.minutesKept(), load_stats.hoursKept(),
+                  _mgr->getOutboundTotal());
+  } else {
+    pos = sprintf(reply, "load %% tx/rx/busy q");
+  }
+  for (int k = 0; k < 5; k++) {
+    LoadBucket b;
+    uint8_t ago = 0;
+    bool ok = k < 3 ? load_stats.window(mins[k], &b) : k == 3 ? load_stats.day(&b) : load_stats.peak(&b, &ago);
+    if (!ok) continue;
+    char t[8], r[8], bz[8], h[8], name[12];
+    fmtPct(t, LoadStats::txPermille(b)); fmtPct(r, LoadStats::rxPermille(b));
+    fmtPct(bz, LoadStats::busyPermille(b)); fmtPct(h, LoadStats::heldPermille(b));
+    if (k == 4) sprintf(name, "peak-%uh", (uint32_t)ago); else strcpy(name, names[k]);
+    uint32_t qa = b.secs ? (b.q_sum * 10 + b.secs / 2) / b.secs : 0;
+    if (serial) {
+      Serial.printf("%-8s tx %s%% rx %s%% busy %s%% held %s%% q %lu.%lu/%u rx %lu tx %lu flood %lu dup %lu err %lu (%lu min)\n",
+                    name, t, r, bz, h, (unsigned long)(qa / 10), (unsigned long)(qa % 10), (uint32_t)b.q_max,
+                    (unsigned long)b.n_rx, (unsigned long)b.n_tx, (unsigned long)b.n_flood, (unsigned long)b.n_dup,
+                    (unsigned long)b.n_err, (unsigned long)(b.secs / 60));
+    } else {
+      char line[48];
+      int len = sprintf(line, "\n%s %s/%s/%s %lu.%lu/%u", name, t, r, bz,
+                        (unsigned long)(qa / 10), (unsigned long)(qa % 10), (uint32_t)b.q_max);
+      if (pos + len > 150) break;
+      strcpy(&reply[pos], line);
+      pos += len;
+    }
+  }
+  if (serial) reply[0] = 0;
+  else if (load_stats.minutesKept() == 0) strcpy(&reply[pos], "\n(first minute not complete)");
 }
 
 uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
@@ -503,7 +648,7 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
 
 mesh::Packet *MyMesh::createSelfAdvert() {
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
-  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data, link_stats_on ? PCES_FEAT1_LINK_STATS : 0);
+  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data, pcesFeat1());
 
   return createAdvert(self_id, app_data, app_data_len);
 }
@@ -769,6 +914,8 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
       reply_len = handleAnonClockReq(sender, timestamp, &data[5]);
     } else if (data[4] == ANON_REQ_TYPE_LINK_STATS && packet->isRouteDirect() && link_stats_on && len > 5) {
       reply_len = handleAnonLinkStatsReq(sender, timestamp, &data[5], len - 5);
+    } else if (data[4] == ANON_REQ_TYPE_LOAD && packet->isRouteDirect() && load_on && len > 5) {
+      reply_len = handleAnonLoadReq(sender, timestamp, &data[5], len - 5);
     } else {
       reply_len = 0;  // unknown/invalid request type
     }
@@ -1054,7 +1201,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       telemetry(MAX_PACKET_PAYLOAD - 4),
       discover_limiter(4, 120),  // max 4 every 2 minutes
       anon_limiter(4, 180),  // max 4 every 3 minutes
-      link_stats_on(true)
+      link_stats_on(true),
+      load_on(true), next_busy_sample(0), last_load_tick(0)
 #if defined(WITH_RS232_BRIDGE)
       , bridge(&_prefs, WITH_RS232_BRIDGE, _mgr, &rtc)
 #endif
@@ -1137,6 +1285,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
   loadLinkStatsPref();
+  last_load_tick = _ms->getMillis();
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1472,6 +1621,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     } else {
       strcpy(reply, "Err - on or off");
     }
+  } else if (strcmp(command, "get pces.load") == 0) {
+    sprintf(reply, "> %s", load_on ? "on" : "off");
+  } else if (memcmp(command, "set pces.load ", 14) == 0) {
+    const char* v = &command[14];
+    if (strcmp(v, "on") == 0 || strcmp(v, "off") == 0) {
+      load_on = v[1] == 'n';
+      if (!load_on) load_stats.clear();
+      saveLinkStatsPref();
+      strcpy(reply, "OK - advert marker from the next advert");
+    } else {
+      strcpy(reply, "Err - on or off");
+    }
+  } else if (strcmp(command, "load clear") == 0) {
+    load_stats.clear();
+    strcpy(reply, "OK");
+  } else if (strcmp(command, "load") == 0) {
+    formatLoad(reply, sender_timestamp == 0);
   } else if (strcmp(command, "linkstats clear") == 0) {
     link_stats.clear();
     strcpy(reply, "OK");
@@ -1497,6 +1663,7 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
+  sampleLoad();   // PCES channel load: receive side only
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();
