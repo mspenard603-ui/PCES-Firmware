@@ -147,7 +147,7 @@ For a V4 already running a MeshCore repeater:
 | `linkstats [N]` | the table, highest weight first, from entry N: `key snr/sd wW age`; `key?` = a hash not resolved yet (the neighbor not heard advertising since the restart, or a hash several share). Over the air the first line is a legend (`N links: key SNR/sd dB, w=weight, age`) and about 4 rows fit; a last line `more: linkstats N` gives the command for the rest |
 | `linkstats clear` | empty the table |
 | `get pces.load` / `set pces.load on\|off` | default on; off: no sampling, no answers to `0x1D`, marker bit `0x0008` off (from the next advert). Saved in `/pces_ls` (2nd byte; a 1-byte file from a build without load reads as on) |
-| `load` | percent of time spent on TX / RX (decoded) / channel busy, then queue avg/max, for `1m` `15m` `1h` `24h` and `peak-Nh` (the busiest complete hour of the day, N hours ago) |
+| `load` | percent of time spent on TX / RX (decoded) / channel busy, then queue avg/max, for `1m` `15m` `1h` `24h` and `peak-Nh` (the busiest complete hour of the day, N hours ago). After a restart a window covers only the complete minutes / hours so far: a short one says so (`15m(4)`, `24h(3h)`), one that would repeat the window before it is left out, and `peak` appears from 2 hours |
 | `load clear` | empty the load history |
 
 Over USB serial, `linkstats` prints every entry with RSSI and sample count, and `load` adds the

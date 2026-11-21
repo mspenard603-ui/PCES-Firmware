@@ -253,13 +253,13 @@ void MyMesh::formatLinkStats(char* reply, int offset, bool serial) {
   int n = link_stats.sorted(list, MAX_LINK_STATS, now);
   if (!link_stats_on) { strcpy(reply, "linkstats off (set pces.linkstats on)"); return; }
   if (serial) {
-    Serial.printf("link stats: %d of %d, half-life %luh\n", n, MAX_LINK_STATS, (unsigned long)(LINK_STATS_HALF_LIFE_SECS / 3600));
+    Serial.printf("link stats: %d of %d, half-life %luh\r\n", n, MAX_LINK_STATS, (unsigned long)(LINK_STATS_HALF_LIFE_SECS / 3600));
     for (int i = 0; i < n; i++) {
       const LinkStatEntry& e = *list[i];
       char k[12] = "", m[12], d[12], a[12];
       fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
       fmtAge(a, now > e.t_last ? now - e.t_last : 0);
-      Serial.printf("%-7s snr %s sd %s w %d rssi %d n %u age %s%s\n", k, m, d,
+      Serial.printf("%-7s snr %s sd %s w %d rssi %d n %u age %s%s\r\n", k, m, d,
                     (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), e.wr > 0 ? (int)lroundf(e.rssi) : 0,
                     (uint32_t)e.n, a, (e.kind & LINK_KIND_ADVERT_ONLY) ? " advert" : "");
     }
@@ -268,7 +268,7 @@ void MyMesh::formatLinkStats(char* reply, int offset, bool serial) {
   }
   // "N links" and a legend, one line per entry from `offset`; when they don't all fit, the last line says how to
   // list the rest: "more: linkstats <next>".
-  int pos = sprintf(reply, "%d links: key SNR/sd dB, w=weight, age", n);
+  int pos = sprintf(reply, "%d link%s: key SNR/sd dB, w=weight, age", n, n == 1 ? "" : "s");
   int i = offset;
   for (; i < n; i++) {
     const LinkStatEntry& e = *list[i];
@@ -413,28 +413,44 @@ static void fmtPct(char* out, uint16_t permille) {   // one decimal, from permil
 // busiest hour of the day. Remote: short lines. Serial: counts as well.
 void MyMesh::formatLoad(char* reply, bool serial) {
   if (!load_on) { strcpy(reply, "load off (set pces.load on)"); return; }
-  static const char* names[5] = { "1m", "15m", "1h", "24h", "peak" };
+  // A window covers only the complete minutes / hours kept so far: one that covers no more than the
+  // window before it is left out (it would repeat it), and a short one says what it covers: "15m(4)".
   static const int mins[3] = { 1, 15, 60 };
   int pos = 0;
   if (serial) {
-    Serial.printf("load: noise floor %d dBm, busy above +%d dB, %d min / %d h kept, queue %d\n",
+    Serial.printf("load: noise floor %d dBm, busy above +%d dB, %d min / %d h kept, queue %d\r\n",
                   _radio->getNoiseFloor(), LOAD_BUSY_DB, load_stats.minutesKept(), load_stats.hoursKept(),
                   _mgr->getOutboundTotal());
   } else {
     pos = sprintf(reply, "load %% tx/rx/busy q");
   }
+  uint32_t prev_min = 0;   // minutes covered by the last window shown
   for (int k = 0; k < 5; k++) {
     LoadBucket b;
     uint8_t ago = 0;
     bool ok = k < 3 ? load_stats.window(mins[k], &b) : k == 3 ? load_stats.day(&b) : load_stats.peak(&b, &ago);
     if (!ok) continue;
-    char t[8], r[8], bz[8], h[8], name[12];
+    uint32_t cov = b.secs / 60;
+    char name[16];
+    if (k < 3) {
+      if (cov <= prev_min) continue;
+      if (cov < (uint32_t)mins[k]) sprintf(name, "%s(%lu)", k == 1 ? "15m" : "1h", (unsigned long)cov);
+      else strcpy(name, k == 0 ? "1m" : k == 1 ? "15m" : "1h");
+      prev_min = cov;
+    } else if (k == 3) {
+      if (cov <= prev_min) continue;   // one hour kept: the same as "1h"
+      int hk = load_stats.hoursKept();
+      if (hk < 24) sprintf(name, "24h(%dh)", hk); else strcpy(name, "24h");
+    } else {
+      if (load_stats.hoursKept() < 2) continue;   // one hour: the busiest is that hour
+      sprintf(name, "peak-%uh", (uint32_t)ago);
+    }
+    char t[8], r[8], bz[8], h[8];
     fmtPct(t, LoadStats::txPermille(b)); fmtPct(r, LoadStats::rxPermille(b));
     fmtPct(bz, LoadStats::busyPermille(b)); fmtPct(h, LoadStats::heldPermille(b));
-    if (k == 4) sprintf(name, "peak-%uh", (uint32_t)ago); else strcpy(name, names[k]);
     uint32_t qa = b.secs ? (b.q_sum * 10 + b.secs / 2) / b.secs : 0;
     if (serial) {
-      Serial.printf("%-8s tx %s%% rx %s%% busy %s%% held %s%% q %lu.%lu/%u rx %lu tx %lu flood %lu dup %lu err %lu (%lu min)\n",
+      Serial.printf("%-8s tx %s%% rx %s%% busy %s%% held %s%% q %lu.%lu/%u rx %lu tx %lu flood %lu dup %lu err %lu (%lu min)\r\n",
                     name, t, r, bz, h, (unsigned long)(qa / 10), (unsigned long)(qa % 10), (uint32_t)b.q_max,
                     (unsigned long)b.n_rx, (unsigned long)b.n_tx, (unsigned long)b.n_flood, (unsigned long)b.n_dup,
                     (unsigned long)b.n_err, (unsigned long)(b.secs / 60));
