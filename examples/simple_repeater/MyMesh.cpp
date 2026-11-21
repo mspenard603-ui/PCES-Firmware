@@ -55,16 +55,33 @@
 #define ANON_REQ_TYPE_REGIONS      0x01
 #define ANON_REQ_TYPE_OWNER        0x02
 #define ANON_REQ_TYPE_BASIC        0x03   // just remote clock
-#define ANON_REQ_TYPE_LINK_STATS   0x1C   // PCES link statistics (provisional; must stay below 0x20, see onAnonDataRecv)
-#define ANON_REQ_TYPE_LOAD         0x1D   // PCES channel load (provisional; Commsol docs/pces-load.md)
+// PCES (docs/pces/). The request types are provisional until MeshCore allocates them; they must
+// stay below 0x20, as onAnonDataRecv reads anything from 0x20 up as a login password.
+#define ANON_REQ_TYPE_LINK_STATS   0x1C   // link statistics (docs/pces/link-stats.md)
+#define ANON_REQ_TYPE_LOAD         0x1D   // channel load (docs/pces/load.md)
 
-#define PCES_FEAT1_FAMILY          0xC500 // advert feature 1: Commsol/PCES family 0xC5xx
-#define PCES_FEAT1_LINK_STATS      0x0004 // bit 2: answers link stats (0x1C)
-#define PCES_FEAT1_LOAD            0x0008 // bit 3: answers channel load (0x1D)
-#define LOAD_BUSY_SAMPLE_MS        50     // RSSI reading while receiving, 20 a second
+#define PCES_FEAT1_FAMILY          0xC500 // advert feature 1: the PCES marker family 0xC5xx
+#define PCES_FEAT1_LINK_STATS      0x0004 // answers link-stats requests
+#define PCES_FEAT1_LOAD            0x0008 // answers channel-load requests
+#define PCES_PREF_FILE             "/pces_ls"
+#define PCES_CLI_REPLY_MAX         150    // longest CLI reply sent over the air
+#define PCES_MORE_LINE_ROOM        20     // room kept for the "more: linkstats N" line
+#define LOAD_BUSY_SAMPLE_MS        50     // one RSSI reading every 50 ms while receiving
 #define LOAD_BUSY_DB               6      // busy: RSSI more than this above the noise floor
-#define LINK_STATS_PREF_FILE       "/pces_ls"
 #define LINK_STATS_MAX_REPLY       167    // MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1)
+
+// "on" or "off" -> *value; false for anything else.
+static bool parseOnOff(const char* text, bool* value) {
+  if (strcmp(text, "on") == 0) {
+    *value = true;
+    return true;
+  }
+  if (strcmp(text, "off") == 0) {
+    *value = false;
+    return true;
+  }
+  return false;
+}
 
 #define CLI_REPLY_DELAY_MILLIS      600
 
@@ -191,231 +208,415 @@ uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender
   return 0;
 }
 
-// PCES link statistics (Commsol docs/pces-link-stats.md). Request data after the sub-type:
-// {reply-path-len}{reply-path}{version=1}{offset}{count}{prefix_len}
+// ---- PCES: link statistics and channel load (docs/pces/link-stats.md, docs/pces/load.md) ----
+
+static uint8_t clampToU8(int v) {
+  if (v < 0) return 0;
+  if (v > 255) return 255;
+  return (uint8_t)v;
+}
+
+static uint16_t clampToU16(uint64_t v) {
+  if (v > 65535) return 65535;
+  return (uint16_t)v;
+}
+
+// A signed value as one byte (int8, two's complement), clamped to -128..127.
+static uint8_t toInt8Byte(int v) {
+  if (v < -128) v = -128;
+  if (v > 127) v = 127;
+  return (uint8_t)(int8_t)v;
+}
+
+static int putU16(uint8_t* dest, int pos, uint16_t v) {
+  memcpy(&dest[pos], &v, 2);
+  return pos + 2;
+}
+
+static int putU32(uint8_t* dest, int pos, uint32_t v) {
+  memcpy(&dest[pos], &v, 4);
+  return pos + 4;
+}
+
+// Anonymous request 0x1C: the link-stats table. Request data after the sub-type:
+//   {reply-path-len}{reply-path}{version = 1}{offset}{count}{prefix_len}
+// The answer is a 17-byte header, then as many table entries as fit (LinkStats::encode).
 uint8_t MyMesh::handleAnonLinkStatsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len) {
   if (!anon_limiter.allow(rtc_clock.getCurrentTime())) return 0;
   if (len < 1) return 0;
-  reply_path_len = *data++; len--;
+  reply_path_len = *data++;
+  len--;
   if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
   size_t path_bytes = mesh::Packet::writePath(reply_path, data, reply_path_len);
   if (len < path_bytes + 4) return 0;
   data += path_bytes;
-  if (data[0] != 1) return 0;   // version
-  uint8_t offset = data[1], count = data[2], prefix_len = data[3];
 
-  memcpy(reply_data, &sender_timestamp, 4);   // prefix with sender_timestamp, like a tag
+  uint8_t version = data[0];
+  uint8_t offset = data[1];
+  uint8_t count = data[2];
+  uint8_t prefix_len = data[3];
+  if (version != 1) return 0;
+
+  uint8_t flags = 0x01;        // bit 0: link stats on
+  if (link_stats.wasFull()) {
+    flags |= 0x02;             // bit 1: the table has been full
+  }
+
   uint32_t now = getRTCClock()->getCurrentTime();
-  memcpy(&reply_data[4], &now, 4);
-  int i = 8;
+  int i = 0;
+  i = putU32(reply_data, i, sender_timestamp);   // the request's timestamp, as a tag
+  i = putU32(reply_data, i, now);
   reply_data[i++] = 1;   // version
-  reply_data[i++] = 0x01 | (link_stats.wasFull() ? 0x02 : 0);
-  int nf = _radio->getNoiseFloor();
-  reply_data[i++] = (uint8_t)(int8_t)(nf < -128 ? -128 : nf > 127 ? 127 : nf);
+  reply_data[i++] = flags;
+  reply_data[i++] = toInt8Byte(_radio->getNoiseFloor());
   reply_data[i++] = (uint8_t)(LINK_STATS_HALF_LIFE_SECS / 3600);
-  uint32_t up_h = (uint32_t)(uptime_millis / 3600000ULL);
-  uint16_t up = up_h > 65535 ? 65535 : (uint16_t)up_h;
-  memcpy(&reply_data[i], &up, 2); i += 2;
+  i = putU16(reply_data, i, clampToU16(uptime_millis / 3600000ULL));
   reply_data[i++] = (uint8_t)link_stats.count();
   reply_data[i++] = offset;
-  uint8_t* n_pos = &reply_data[i++];
+  int count_pos = i++;   // the number of entries sent, filled in below
+
   uint8_t written = 0;
   i += link_stats.encode(&reply_data[i], LINK_STATS_MAX_REPLY - i, offset, count, prefix_len, now, &written);
-  *n_pos = written;
+  reply_data[count_pos] = written;
   return i;
 }
 
-static void fmtTenths(char* out, float v, bool sign) {   // no %f: newlib-nano on some boards lacks it
-  long t = lroundf(v * 10.0f);
-  char sg = t < 0 ? '-' : (sign ? '+' : 0);
-  if (t < 0) t = -t;
-  if (sg) sprintf(out, "%c%ld.%ld", sg, t / 10, t % 10);
-  else sprintf(out, "%ld.%ld", t / 10, t % 10);
+// Formats v with one decimal: "12.3", or "+12.3" with show_plus. (No %f: the newlib-nano used on
+// some boards doesn't support it.)
+static void formatTenths(char* out, float v, bool show_plus) {
+  long tenths = lroundf(v * 10.0f);
+  const char* sign = "";
+  if (tenths < 0) {
+    sign = "-";
+    tenths = -tenths;
+  } else if (show_plus) {
+    sign = "+";
+  }
+  sprintf(out, "%s%ld.%ld", sign, tenths / 10, tenths % 10);
 }
 
-static void fmtKey(char* out, const LinkStatEntry& e) {
-  int n = (e.kind & LINK_KIND_RESOLVED) ? 2 : (e.kind & LINK_KIND_WIDTH_MASK) + 1;
-  for (int i = 0; i < n; i++) sprintf(&out[i * 2], "%02X", (uint32_t)e.key[i]);
-  if (!(e.kind & LINK_KIND_RESOLVED)) strcat(out, "?");
+// The entry's key in hex: 2 bytes for a resolved neighbor (enough to recognize it), otherwise the
+// hash as heard, followed by "?".
+static void formatLinkKey(char* out, const LinkStatEntry& e) {
+  bool resolved = (e.kind & LINK_KIND_RESOLVED) != 0;
+  int bytes = resolved ? 2 : LinkStats::keyLength(e);
+  out[0] = 0;
+  for (int i = 0; i < bytes; i++) {
+    sprintf(&out[i * 2], "%02X", (uint32_t)e.key[i]);
+  }
+  if (!resolved) {
+    strcat(out, "?");
+  }
 }
 
-static void fmtAge(char* out, uint32_t secs) {
-  if (secs < 3600) sprintf(out, "%lum", (unsigned long)(secs / 60));
-  else if (secs < 172800) sprintf(out, "%luh", (unsigned long)(secs / 3600));
-  else sprintf(out, "%lud", (unsigned long)(secs / 86400));
+static void formatAge(char* out, uint32_t secs) {
+  if (secs < 3600) {
+    sprintf(out, "%lum", (unsigned long)(secs / 60));
+  } else if (secs < 2 * 86400) {
+    sprintf(out, "%luh", (unsigned long)(secs / 3600));
+  } else {
+    sprintf(out, "%lud", (unsigned long)(secs / 86400));
+  }
 }
 
-// CLI "linkstats [N]": the table, highest weight first. Remote: lines from N while they fit in a
-// CLI reply. Serial: every entry, with RSSI and sample count.
+// The text of one link-stats row.
+struct LinkRowText {
+  char key[12];
+  char snr[12];
+  char sd[12];
+  char age[12];
+  int weight;
+};
+
+static void describeLinkEntry(const LinkStats& stats, const LinkStatEntry& e, uint32_t now, LinkRowText* row) {
+  formatLinkKey(row->key, e);
+  formatTenths(row->snr, e.mean, true);
+  formatTenths(row->sd, stats.sd(e), false);
+  uint32_t age = 0;
+  if (now > e.t_last) {
+    age = now - e.t_last;
+  }
+  formatAge(row->age, age);
+  row->weight = (int)lroundf(LinkStats::aged(e.w, e.t_last, now));
+}
+
+// CLI "linkstats [N]": the table, highest weight first. Over USB serial every entry is printed with
+// its RSSI and sample count. A remote reply starts with a legend and lists entries from N while
+// they fit; if some are left out, its last line gives the command for the rest, e.g.
+// "more: linkstats 5".
 void MyMesh::formatLinkStats(char* reply, int offset, bool serial) {
+  if (!link_stats_on) {
+    strcpy(reply, "linkstats off (set pces.linkstats on)");
+    return;
+  }
   uint32_t now = getRTCClock()->getCurrentTime();
   const LinkStatEntry* list[MAX_LINK_STATS];
   int n = link_stats.sorted(list, MAX_LINK_STATS, now);
-  if (!link_stats_on) { strcpy(reply, "linkstats off (set pces.linkstats on)"); return; }
+
   if (serial) {
-    Serial.printf("link stats: %d of %d, half-life %luh\r\n", n, MAX_LINK_STATS, (unsigned long)(LINK_STATS_HALF_LIFE_SECS / 3600));
+    Serial.printf("link stats: %d of %d, half-life %luh\r\n", n, MAX_LINK_STATS,
+                  (unsigned long)(LINK_STATS_HALF_LIFE_SECS / 3600));
     for (int i = 0; i < n; i++) {
       const LinkStatEntry& e = *list[i];
-      char k[12] = "", m[12], d[12], a[12];
-      fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
-      fmtAge(a, now > e.t_last ? now - e.t_last : 0);
-      Serial.printf("%-7s snr %s sd %s w %d rssi %d n %u age %s%s\r\n", k, m, d,
-                    (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), e.wr > 0 ? (int)lroundf(e.rssi) : 0,
-                    (uint32_t)e.n, a, (e.kind & LINK_KIND_ADVERT_ONLY) ? " advert" : "");
+      LinkRowText row;
+      describeLinkEntry(link_stats, e, now, &row);
+      int rssi = 0;
+      if (e.wr > 0) {
+        rssi = (int)lroundf(e.rssi);
+      }
+      const char* note = "";
+      if (e.kind & LINK_KIND_ADVERT_ONLY) {
+        note = " advert";
+      }
+      Serial.printf("%-7s snr %s sd %s w %d rssi %d n %u age %s%s\r\n",
+                    row.key, row.snr, row.sd, row.weight, rssi, (uint32_t)e.n, row.age, note);
     }
     reply[0] = 0;
     return;
   }
-  // "N links" and a legend, one line per entry from `offset`; when they don't all fit, the last line says how to
-  // list the rest: "more: linkstats <next>".
-  int pos = sprintf(reply, "%d link%s: key SNR/sd dB, w=weight, age", n, n == 1 ? "" : "s");
+
+  int pos = sprintf(reply, "%d %s: key SNR/sd dB, w=weight, age", n, n == 1 ? "link" : "links");
   int i = offset;
-  for (; i < n; i++) {
-    const LinkStatEntry& e = *list[i];
-    char line[48], k[12] = "", m[12], d[12], a[12];
-    fmtKey(k, e); fmtTenths(m, e.mean, true); fmtTenths(d, link_stats.sd(e), false);
-    fmtAge(a, now > e.t_last ? now - e.t_last : 0);
-    int len = sprintf(line, "\n%s %s/%s w%d %s", k, m, d, (int)lroundf(LinkStats::aged(e.w, e.t_last, now)), a);
-    int room = i + 1 < n ? 150 - 20 : 150;   // keep room for the "more" line unless this is the last
-    if (pos + len > room) break;
+  while (i < n) {
+    LinkRowText row;
+    describeLinkEntry(link_stats, *list[i], now, &row);
+    char line[48];
+    int len = sprintf(line, "\n%s %s/%s w%d %s", row.key, row.snr, row.sd, row.weight, row.age);
+
+    int limit = PCES_CLI_REPLY_MAX;
+    bool last_entry = (i + 1 == n);
+    if (!last_entry) {
+      limit -= PCES_MORE_LINE_ROOM;   // keep room for the "more" line
+    }
+    if (pos + len > limit) break;
+
     strcpy(&reply[pos], line);
     pos += len;
+    i++;
   }
-  if (i < n) sprintf(&reply[pos], "\nmore: linkstats %d", i);
+  if (i < n) {
+    sprintf(&reply[pos], "\nmore: linkstats %d", i);
+  }
 }
 
+// The PCES switches are saved in PCES_PREF_FILE: [link stats on][load on], one byte each. Both
+// default to on (flashing this firmware is the opt-in). A file from a build before channel load
+// has only the first byte; load is then on.
 void MyMesh::loadLinkStatsPref() {
-  link_stats_on = true;   // default: flashing this firmware is the opt-in
+  link_stats_on = true;
   load_on = true;
-  if (_fs->exists(LINK_STATS_PREF_FILE)) {
+  if (!_fs->exists(PCES_PREF_FILE)) return;
+
 #if defined(RP2040_PLATFORM)
-    File f = _fs->open(LINK_STATS_PREF_FILE, "r");
+  File f = _fs->open(PCES_PREF_FILE, "r");
 #else
-    File f = _fs->open(LINK_STATS_PREF_FILE);
+  File f = _fs->open(PCES_PREF_FILE);
 #endif
-    if (f) {
-      uint8_t v[2] = { 1, 1 };   // [link stats][load]; a 1-byte file (link stats only): load on
-      int n = f.read(v, 2);
-      if (n >= 1) link_stats_on = v[0] != 0;
-      if (n >= 2) load_on = v[1] != 0;
-      f.close();
-    }
+  if (f) {
+    uint8_t v[2] = { 1, 1 };
+    int n = f.read(v, 2);
+    if (n >= 1) link_stats_on = v[0] != 0;
+    if (n >= 2) load_on = v[1] != 0;
+    f.close();
   }
 }
 
 void MyMesh::saveLinkStatsPref() {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  _fs->remove(LINK_STATS_PREF_FILE);
-  File f = _fs->open(LINK_STATS_PREF_FILE, FILE_O_WRITE);
+  _fs->remove(PCES_PREF_FILE);
+  File f = _fs->open(PCES_PREF_FILE, FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
-  File f = _fs->open(LINK_STATS_PREF_FILE, "w");
+  File f = _fs->open(PCES_PREF_FILE, "w");
 #else
-  File f = _fs->open(LINK_STATS_PREF_FILE, "w", true);
+  File f = _fs->open(PCES_PREF_FILE, "w", true);
 #endif
   if (f) {
-    uint8_t v[2] = { (uint8_t)(link_stats_on ? 1 : 0), (uint8_t)(load_on ? 1 : 0) };
+    uint8_t v[2];
+    v[0] = link_stats_on ? 1 : 0;
+    v[1] = load_on ? 1 : 0;
     f.write(v, 2);
     f.close();
   }
 }
 
-// PCES channel load (Commsol docs/pces-load.md). Request data after the sub-type:
-// {reply-path-len}{reply-path}{version=1}
+// Anonymous request 0x1D: channel load. Request data after the sub-type:
+//   {reply-path-len}{reply-path}{version = 1}
+// The answer is an 18-byte header and five 22-byte windows (1 min, 15 min, 1 h, 24 h, busiest
+// hour): 128 bytes.
 uint8_t MyMesh::handleAnonLoadReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data, size_t len) {
   if (!anon_limiter.allow(rtc_clock.getCurrentTime())) return 0;
   if (len < 1) return 0;
-  reply_path_len = *data++; len--;
+  reply_path_len = *data++;
+  len--;
   if (!mesh::Packet::isValidPathLen(reply_path_len)) return 0;  // reject - bad encoding
   size_t path_bytes = mesh::Packet::writePath(reply_path, data, reply_path_len);
   if (len < path_bytes + 1) return 0;
   data += path_bytes;
-  if (data[0] != 1) return 0;   // version
+  uint8_t version = data[0];
+  if (version != 1) return 0;
 
-  memcpy(reply_data, &sender_timestamp, 4);   // prefix with sender_timestamp, like a tag
+  int noise_floor = _radio->getNoiseFloor();
+  bool busy_sampled = noise_floor != 0 && !_prefs.powersaving_enabled;
+  bool listen_before_talk = _prefs.interference_threshold > 0 || _prefs.cad_enabled;
+  uint8_t flags = 0x01;                              // bit 0: load on
+  if (busy_sampled) flags |= 0x02;                   // bit 1: the busy share is being sampled
+  if (listen_before_talk) flags |= 0x04;             // bit 2: it waits while the channel is busy
+  if (_prefs.powersaving_enabled) flags |= 0x08;     // bit 3: power saving on (busy not sampled)
+
   uint32_t now = getRTCClock()->getCurrentTime();
-  memcpy(&reply_data[4], &now, 4);
-  int i = 8;
-  int nf = _radio->getNoiseFloor();
+  int i = 0;
+  i = putU32(reply_data, i, sender_timestamp);   // the request's timestamp, as a tag
+  i = putU32(reply_data, i, now);
   reply_data[i++] = 1;   // version
-  reply_data[i++] = 0x01 | (nf != 0 && !_prefs.powersaving_enabled ? 0x02 : 0)
-                  | ((_prefs.interference_threshold > 0 || _prefs.cad_enabled) ? 0x04 : 0)
-                  | (_prefs.powersaving_enabled ? 0x08 : 0);
-  reply_data[i++] = (uint8_t)(int8_t)(nf < -128 ? -128 : nf > 127 ? 127 : nf);
+  reply_data[i++] = flags;
+  reply_data[i++] = toInt8Byte(noise_floor);
   reply_data[i++] = LOAD_BUSY_DB;
-  float af = _prefs.airtime_factor * 10.0f;
-  reply_data[i++] = af <= 0 ? 0 : af >= 255 ? 255 : (uint8_t)lroundf(af);
-  uint32_t up_h = (uint32_t)(uptime_millis / 3600000ULL);
-  uint16_t up = up_h > 65535 ? 65535 : (uint16_t)up_h;
-  memcpy(&reply_data[i], &up, 2); i += 2;
-  int q = _mgr->getOutboundTotal(), fr = _mgr->getFreeCount();
-  reply_data[i++] = q > 255 ? 255 : (uint8_t)q;
-  reply_data[i++] = fr > 255 ? 255 : (uint8_t)fr;
-  uint8_t* ago_pos = &reply_data[i++];
-  *ago_pos = 0xFF;
+  reply_data[i++] = clampToU8((int)lroundf(_prefs.airtime_factor * 10.0f));
+  i = putU16(reply_data, i, clampToU16(uptime_millis / 3600000ULL));
+  reply_data[i++] = clampToU8(_mgr->getOutboundTotal());   // TX queue now
+  reply_data[i++] = clampToU8(_mgr->getFreeCount());       // free packet buffers
+  int peak_ago_pos = i++;
+  reply_data[peak_ago_pos] = 0xFF;                         // no busiest hour yet
 
+  static const int window_minutes[3] = { 1, 15, 60 };
   LoadBucket b;
-  static const int mins[3] = { 1, 15, 60 };
   for (int k = 0; k < 3; k++) {
-    bool ok = load_stats.window(mins[k], &b);
+    bool ok = load_stats.window(window_minutes[k], &b);
     i += LoadStats::encodeWindow(&reply_data[i], b, ok);
   }
   bool ok = load_stats.day(&b);
   i += LoadStats::encodeWindow(&reply_data[i], b, ok);
-  uint8_t ago = 0;
-  ok = load_stats.peak(&b, &ago);
-  if (ok) *ago_pos = ago;
+
+  uint8_t peak_ago = 0;
+  ok = load_stats.peak(&b, &peak_ago);
+  if (ok) {
+    reply_data[peak_ago_pos] = peak_ago;
+  }
   i += LoadStats::encodeWindow(&reply_data[i], b, ok);
-  return i;   // 18 + 5 x 22 = 128 bytes
+  return i;
 }
 
-// Called from loop(): RSSI busy samples while receiving, and once a second the counters.
-// Adds no wake-ups: with power saving on the MCU sleeps between radio events, so the loop runs
-// mostly right after a packet and busy samples would be biased; they are skipped then (counters only).
+// Called from loop(), right after the mesh has handled the radio.
 void MyMesh::sampleLoad() {
   if (!load_on) return;
   unsigned long now = _ms->getMillis();
+
+  // Busy share: one RSSI reading every LOAD_BUSY_SAMPLE_MS while the radio is receiving (so our
+  // own TX never counts), once the noise floor is known. Skipped with power saving on: the MCU
+  // then sleeps between radio events, the loop runs mostly right after a packet, and the readings
+  // would be biased. Sampling never adds a wake-up.
   if ((long)(now - next_busy_sample) >= 0) {
     next_busy_sample = now + LOAD_BUSY_SAMPLE_MS;
-    int nf = _radio->getNoiseFloor();
-    if (nf != 0 && !_prefs.powersaving_enabled && radio_driver.isInRecvMode()) {   // not while transmitting; not before the floor is known
-      load_stats.busySample(radio_driver.getCurrentRSSI() > nf + LOAD_BUSY_DB);
+    int noise_floor = _radio->getNoiseFloor();
+    bool can_sample = noise_floor != 0 && !_prefs.powersaving_enabled && radio_driver.isInRecvMode();
+    if (can_sample) {
+      bool busy = radio_driver.getCurrentRSSI() > noise_floor + LOAD_BUSY_DB;
+      load_stats.busySample(busy);
     }
   }
-  uint32_t el = (uint32_t)(now - last_load_tick) / 1000;
-  if (el >= 1) {
-    last_load_tick += el * 1000;
-    LoadCounters c;
-    c.tx_ms = getTotalAirTime();
-    c.rx_ms = getReceiveAirTime();
-    c.n_rx = radio_driver.getPacketsRecv();
-    c.n_tx = radio_driver.getPacketsSent();
-    c.n_flood = getNumRecvFlood();
-    c.n_dup = ((SimpleMeshTables *)getTables())->getNumFloodDups();
-    c.n_err = radio_driver.getPacketsRecvErrors();
-    int q = _mgr->getOutboundTotal();
-    bool held = _mgr->getOutboundCount(now) > 0
-             && getRemainingTxBudget() < _radio->getEstAirtimeFor(MAX_TRANS_UNIT) / 2;
-    load_stats.tick(el, c, q > 255 ? 255 : (uint8_t)q, held);
-  }
+
+  // Once a second: the counters the firmware keeps anyway.
+  uint32_t elapsed_s = (uint32_t)(now - last_load_tick) / 1000;
+  if (elapsed_s == 0) return;
+  last_load_tick += elapsed_s * 1000;
+
+  LoadCounters c;
+  c.tx_ms = getTotalAirTime();
+  c.rx_ms = getReceiveAirTime();
+  c.n_rx = radio_driver.getPacketsRecv();
+  c.n_tx = radio_driver.getPacketsSent();
+  c.n_flood = getNumRecvFlood();
+  c.n_dup = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+  c.n_err = radio_driver.getPacketsRecvErrors();
+
+  // "Held": a packet is ready to go, but the airtime budget doesn't cover half a full-size packet.
+  bool packet_ready = _mgr->getOutboundCount(now) > 0;
+  bool held = packet_ready && getRemainingTxBudget() < _radio->getEstAirtimeFor(MAX_TRANS_UNIT) / 2;
+  load_stats.tick(elapsed_s, c, clampToU8(_mgr->getOutboundTotal()), held);
 }
 
+// Advert feature 1: the PCES marker family with a bit per answer this repeater gives, or 0 (no
+// marker) when both are off.
 uint16_t MyMesh::pcesFeat1() const {
-  uint16_t bits = (link_stats_on ? PCES_FEAT1_LINK_STATS : 0) | (load_on ? PCES_FEAT1_LOAD : 0);
-  return bits ? (PCES_FEAT1_FAMILY | bits) : 0;
+  uint16_t bits = 0;
+  if (link_stats_on) bits |= PCES_FEAT1_LINK_STATS;
+  if (load_on) bits |= PCES_FEAT1_LOAD;
+  if (bits == 0) return 0;
+  return PCES_FEAT1_FAMILY | bits;
 }
 
-static void fmtPct(char* out, uint16_t permille) {   // one decimal, from permille; "-" when not measured
-  if (permille == 0xFFFF) { strcpy(out, "-"); return; }
+// A share in percent with one decimal, from permille; "-" when it wasn't measured (0xFFFF).
+static void formatPercent(char* out, uint16_t permille) {
+  if (permille == 0xFFFF) {
+    strcpy(out, "-");
+    return;
+  }
   sprintf(out, "%u.%u", (uint32_t)(permille / 10), (uint32_t)(permille % 10));
 }
 
-// CLI "load": TX / RX / busy shares (%) and the TX queue for 1 min, 15 min, 1 h, 24 h and the
-// busiest hour of the day. Remote: short lines. Serial: counts as well.
+// One line of the "load" CLI output: a window of the history and its label.
+struct LoadWindow {
+  char label[16];
+  LoadBucket bucket;
+};
+
+// The windows "load" shows: 1m, 15m, 1h, 24h and the busiest hour. After a restart a window covers
+// only the complete minutes or hours kept so far. A window that would cover no more than the one
+// before it is left out (it would repeat it), and a short one says what it covers, e.g. "15m(4)" or
+// "24h(3h)". The busiest hour is shown once there are two hours to choose from.
+static int collectLoadWindows(const LoadStats& stats, LoadWindow* out) {
+  static const int window_minutes[3] = { 1, 15, 60 };
+  static const char* window_names[3] = { "1m", "15m", "1h" };
+  int n = 0;
+  uint32_t shown_minutes = 0;   // minutes covered by the last window added
+
+  for (int k = 0; k < 3; k++) {
+    LoadBucket b;
+    if (!stats.window(window_minutes[k], &b)) continue;
+    uint32_t covered = b.secs / 60;
+    if (covered <= shown_minutes) continue;
+    if (covered < (uint32_t)window_minutes[k]) {
+      sprintf(out[n].label, "%s(%lu)", window_names[k], (unsigned long)covered);
+    } else {
+      strcpy(out[n].label, window_names[k]);
+    }
+    out[n].bucket = b;
+    n++;
+    shown_minutes = covered;
+  }
+
+  LoadBucket day;
+  if (stats.day(&day) && day.secs / 60 > shown_minutes) {
+    int hours = stats.hoursKept();
+    if (hours < 24) {
+      sprintf(out[n].label, "24h(%dh)", hours);
+    } else {
+      strcpy(out[n].label, "24h");
+    }
+    out[n].bucket = day;
+    n++;
+  }
+
+  LoadBucket peak;
+  uint8_t peak_ago = 0;
+  if (stats.hoursKept() >= 2 && stats.peak(&peak, &peak_ago)) {
+    sprintf(out[n].label, "peak-%uh", (uint32_t)peak_ago);
+    out[n].bucket = peak;
+    n++;
+  }
+  return n;
+}
+
+// CLI "load": TX / RX / busy shares (%) and the TX queue (average / maximum) per window. Over USB
+// serial it also prints the noise floor, the held share and the packet counts.
 void MyMesh::formatLoad(char* reply, bool serial) {
-  if (!load_on) { strcpy(reply, "load off (set pces.load on)"); return; }
-  // A window covers only the complete minutes / hours kept so far: one that covers no more than the
-  // window before it is left out (it would repeat it), and a short one says what it covers: "15m(4)".
-  static const int mins[3] = { 1, 15, 60 };
+  if (!load_on) {
+    strcpy(reply, "load off (set pces.load on)");
+    return;
+  }
+  LoadWindow windows[5];
+  int n = collectLoadWindows(load_stats, windows);
+
   int pos = 0;
   if (serial) {
     Serial.printf("load: noise floor %d dBm, busy above +%d dB, %d min / %d h kept, queue %d\r\n",
@@ -424,47 +625,41 @@ void MyMesh::formatLoad(char* reply, bool serial) {
   } else {
     pos = sprintf(reply, "load %% tx/rx/busy q");
   }
-  uint32_t prev_min = 0;   // minutes covered by the last window shown
-  for (int k = 0; k < 5; k++) {
-    LoadBucket b;
-    uint8_t ago = 0;
-    bool ok = k < 3 ? load_stats.window(mins[k], &b) : k == 3 ? load_stats.day(&b) : load_stats.peak(&b, &ago);
-    if (!ok) continue;
-    uint32_t cov = b.secs / 60;
-    char name[16];
-    if (k < 3) {
-      if (cov <= prev_min) continue;
-      if (cov < (uint32_t)mins[k]) sprintf(name, "%s(%lu)", k == 1 ? "15m" : "1h", (unsigned long)cov);
-      else strcpy(name, k == 0 ? "1m" : k == 1 ? "15m" : "1h");
-      prev_min = cov;
-    } else if (k == 3) {
-      if (cov <= prev_min) continue;   // one hour kept: the same as "1h"
-      int hk = load_stats.hoursKept();
-      if (hk < 24) sprintf(name, "24h(%dh)", hk); else strcpy(name, "24h");
-    } else {
-      if (load_stats.hoursKept() < 2) continue;   // one hour: the busiest is that hour
-      sprintf(name, "peak-%uh", (uint32_t)ago);
+
+  for (int k = 0; k < n; k++) {
+    const LoadBucket& b = windows[k].bucket;
+    char tx[8], rx[8], busy[8], held[8];
+    formatPercent(tx, LoadStats::txPermille(b));
+    formatPercent(rx, LoadStats::rxPermille(b));
+    formatPercent(busy, LoadStats::busyPermille(b));
+    formatPercent(held, LoadStats::heldPermille(b));
+    uint32_t queue_avg_x10 = 0;
+    if (b.secs > 0) {
+      queue_avg_x10 = (b.q_sum * 10 + b.secs / 2) / b.secs;
     }
-    char t[8], r[8], bz[8], h[8];
-    fmtPct(t, LoadStats::txPermille(b)); fmtPct(r, LoadStats::rxPermille(b));
-    fmtPct(bz, LoadStats::busyPermille(b)); fmtPct(h, LoadStats::heldPermille(b));
-    uint32_t qa = b.secs ? (b.q_sum * 10 + b.secs / 2) / b.secs : 0;
+    unsigned long queue_whole = queue_avg_x10 / 10;
+    unsigned long queue_tenth = queue_avg_x10 % 10;
+
     if (serial) {
       Serial.printf("%-8s tx %s%% rx %s%% busy %s%% held %s%% q %lu.%lu/%u rx %lu tx %lu flood %lu dup %lu err %lu (%lu min)\r\n",
-                    name, t, r, bz, h, (unsigned long)(qa / 10), (unsigned long)(qa % 10), (uint32_t)b.q_max,
-                    (unsigned long)b.n_rx, (unsigned long)b.n_tx, (unsigned long)b.n_flood, (unsigned long)b.n_dup,
-                    (unsigned long)b.n_err, (unsigned long)(b.secs / 60));
+                    windows[k].label, tx, rx, busy, held, queue_whole, queue_tenth, (uint32_t)b.q_max,
+                    (unsigned long)b.n_rx, (unsigned long)b.n_tx, (unsigned long)b.n_flood,
+                    (unsigned long)b.n_dup, (unsigned long)b.n_err, (unsigned long)(b.secs / 60));
     } else {
       char line[48];
-      int len = sprintf(line, "\n%s %s/%s/%s %lu.%lu/%u", name, t, r, bz,
-                        (unsigned long)(qa / 10), (unsigned long)(qa % 10), (uint32_t)b.q_max);
-      if (pos + len > 150) break;
+      int len = sprintf(line, "\n%s %s/%s/%s %lu.%lu/%u", windows[k].label, tx, rx, busy,
+                        queue_whole, queue_tenth, (uint32_t)b.q_max);
+      if (pos + len > PCES_CLI_REPLY_MAX) break;
       strcpy(&reply[pos], line);
       pos += len;
     }
   }
-  if (serial) reply[0] = 0;
-  else if (load_stats.minutesKept() == 0) strcpy(&reply[pos], "\n(first minute not complete)");
+
+  if (serial) {
+    reply[0] = 0;
+  } else if (load_stats.minutesKept() == 0) {
+    strcpy(&reply[pos], "\n(first minute not complete)");
+  }
 }
 
 uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
@@ -762,8 +957,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
-// The neighbour this copy was heard from, by its hash: exactly one stock neighbour-table entry
-// (zero-hop repeater adverts) with that prefix -> its key prefix.
+// The neighbor a packet was relayed by, from its hash: the one entry of the stock neighbor table
+// (filled from zero-hop repeater adverts) whose key starts with it. Writes its 4-byte key prefix;
+// false when no entry, or more than one, matches.
 bool MyMesh::resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4) {
 #if MAX_NEIGHBOURS
   int found = -1;
@@ -775,49 +971,57 @@ bool MyMesh::resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4) {
     }
   }
   if (found < 0) return false;
-  memcpy(key4, neighbours[found].id.pub_key, 4);
+  memcpy(key4, neighbours[found].id.pub_key, LINK_KEY_SIZE);
   return true;
 #else
   return false;
 #endif
 }
 
-// Every received copy (called from logRx, duplicates included): the hop that sent it, when the
-// packet names it. Flood: the last hash of the path. TRACE: route hop k-1 after k SNR bytes.
-// Others (direct: the path holds the hops still ahead; zero-hop: the originator) name no sender.
+// Called for every packet received (from logRx, duplicates included). Samples the link from the
+// neighbor that sent this copy, when the packet names it:
+//  - a flood packet: the last hash in its path is the repeater that just relayed it;
+//  - a TRACE: after k SNR bytes, route hop k-1 sent it.
+// Other packets don't name the sender: a direct packet's path holds the hops still ahead, and a
+// flood with an empty path comes from its originator (zero-hop adverts: see onAdvertRecv).
 void MyMesh::sampleLinkStats(const mesh::Packet* pkt) {
   if (!link_stats_on) return;
+
   const uint8_t* hash = NULL;
-  uint8_t w = 0;
+  uint8_t hash_len = 0;
   if (pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) {
     if (!pkt->isRouteDirect() || pkt->payload_len < 9) return;
-    uint8_t k = pkt->path_len;   // TRACE: raw count of SNR bytes appended so far
-    if (k == 0 || k >= MAX_PATH_SIZE) return;
-    uint8_t sz = pkt->payload[8] & 0x03;
-    w = 1 << sz;
-    uint16_t off = 9 + ((uint16_t)(k - 1) << sz);
-    if (off + w > pkt->payload_len) return;
-    hash = &pkt->payload[off];
+    uint8_t snr_count = pkt->path_len;   // a TRACE's path holds the SNRs added so far
+    if (snr_count == 0 || snr_count >= MAX_PATH_SIZE) return;
+    uint8_t size_code = pkt->payload[8] & 0x03;   // route hashes are (1 << size_code) bytes
+    hash_len = 1 << size_code;
+    uint16_t hash_pos = 9 + ((uint16_t)(snr_count - 1) << size_code);
+    if (hash_pos + hash_len > pkt->payload_len) return;
+    hash = &pkt->payload[hash_pos];
   } else if (pkt->isRouteFlood()) {
-    uint8_t k = pkt->getPathHashCount();
-    if (k == 0) return;   // the originator (zero-hop adverts: onAdvertRecv)
-    w = pkt->getPathHashSize();
-    hash = &pkt->path[(k - 1) * w];
+    uint8_t hop_count = pkt->getPathHashCount();
+    if (hop_count == 0) return;
+    hash_len = pkt->getPathHashSize();
+    hash = &pkt->path[(hop_count - 1) * hash_len];
   } else {
     return;
   }
-  if (self_id.isHashMatch(hash, w)) return;
+  if (self_id.isHashMatch(hash, hash_len)) return;   // a copy we relayed ourselves
+
   uint32_t now = getRTCClock()->getCurrentTime();
-  uint8_t key[4];
-  if (resolveNeighbour(hash, w, key)) {
-    link_stats.sample(key, 4, true, false, pkt->getSNR(), _radio->getLastRSSI(), true, now);
+  float snr = pkt->getSNR();
+  float rssi = _radio->getLastRSSI();
+  uint8_t key[LINK_KEY_SIZE];
+  bool resolved = resolveNeighbour(hash, hash_len, key);
+  if (resolved) {
+    link_stats.addPacket(key, LINK_KEY_SIZE, resolved, snr, rssi, now);
   } else {
-    link_stats.sample(hash, w > 3 ? 3 : w, false, false, pkt->getSNR(), _radio->getLastRSSI(), true, now);
+    link_stats.addPacket(hash, hash_len, resolved, snr, rssi, now);
   }
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
-  sampleLinkStats(pkt);   // PCES link statistics: receive side only
+  sampleLinkStats(pkt);   // PCES link statistics (receiving only)
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
     bridge.sendPacket(pkt);
@@ -1002,10 +1206,11 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
     }
-    // PCES link statistics: repeaters and room servers only (never companions: no public list of
-    // the phones this repeater hears). SNR only: the advert may be processed after a receive delay.
-    if (link_stats_on && parser.isValid() && (parser.getType() == ADV_TYPE_REPEATER || parser.getType() == ADV_TYPE_ROOM)) {
-      link_stats.sample(id.pub_key, 4, true, true, packet->getSNR(), 0, false, getRTCClock()->getCurrentTime());
+    // PCES link statistics: repeaters and room servers only, never companions (that would make a
+    // public list of the phones this repeater hears).
+    bool is_relay = parser.getType() == ADV_TYPE_REPEATER || parser.getType() == ADV_TYPE_ROOM;
+    if (link_stats_on && parser.isValid() && is_relay) {
+      link_stats.addAdvert(id.pub_key, packet->getSNR(), getRTCClock()->getCurrentTime());
     }
   }
 }
@@ -1218,7 +1423,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       discover_limiter(4, 120),  // max 4 every 2 minutes
       anon_limiter(4, 180),  // max 4 every 3 minutes
       link_stats_on(true),
-      load_on(true), next_busy_sample(0), last_load_tick(0)
+      load_on(true),
+      next_busy_sample(0),
+      last_load_tick(0)
 #if defined(WITH_RS232_BRIDGE)
       , bridge(&_prefs, WITH_RS232_BRIDGE, _mgr, &rtc)
 #endif
@@ -1629,9 +1836,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else if (strcmp(command, "get pces.linkstats") == 0) {
     sprintf(reply, "> %s", link_stats_on ? "on" : "off");
   } else if (memcmp(command, "set pces.linkstats ", 19) == 0) {
-    const char* v = &command[19];
-    if (strcmp(v, "on") == 0 || strcmp(v, "off") == 0) {
-      link_stats_on = v[1] == 'n';
+    bool on;
+    if (parseOnOff(&command[19], &on)) {
+      link_stats_on = on;
       saveLinkStatsPref();
       strcpy(reply, "OK - advert marker from the next advert");
     } else {
@@ -1640,9 +1847,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else if (strcmp(command, "get pces.load") == 0) {
     sprintf(reply, "> %s", load_on ? "on" : "off");
   } else if (memcmp(command, "set pces.load ", 14) == 0) {
-    const char* v = &command[14];
-    if (strcmp(v, "on") == 0 || strcmp(v, "off") == 0) {
-      load_on = v[1] == 'n';
+    bool on;
+    if (parseOnOff(&command[14], &on)) {
+      load_on = on;
       if (!load_on) load_stats.clear();
       saveLinkStatsPref();
       strcpy(reply, "OK - advert marker from the next advert");
@@ -1653,12 +1860,14 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     load_stats.clear();
     strcpy(reply, "OK");
   } else if (strcmp(command, "load") == 0) {
-    formatLoad(reply, sender_timestamp == 0);
+    formatLoad(reply, sender_timestamp == 0);   // timestamp 0: typed on the serial console
   } else if (strcmp(command, "linkstats clear") == 0) {
     link_stats.clear();
     strcpy(reply, "OK");
   } else if (memcmp(command, "linkstats", 9) == 0 && (command[9] == 0 || command[9] == ' ')) {
-    formatLinkStats(reply, command[9] == ' ' ? atoi(&command[10]) : 0, sender_timestamp == 0);
+    int offset = 0;
+    if (command[9] == ' ') offset = atoi(&command[10]);
+    formatLinkStats(reply, offset, sender_timestamp == 0);
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {
     const char* sub = command + 18;
     while (*sub == ' ') sub++;
@@ -1679,7 +1888,7 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
-  sampleLoad();   // PCES channel load: receive side only
+  sampleLoad();   // PCES channel load (sampling only, nothing sent)
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();

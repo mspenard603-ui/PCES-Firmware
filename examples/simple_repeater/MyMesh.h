@@ -73,7 +73,7 @@ struct NeighbourInfo {
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.18.0-pces1"   // PCES: tells it apart from stock v1.18.0 in `ver`
+  #define FIRMWARE_VERSION   "v1.18.0-pces1"   // PCES build: tells it apart from stock v1.18.0 in "ver"
 #endif
 
 #define FIRMWARE_ROLE "repeater"
@@ -105,11 +105,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
-  LinkStats link_stats;      // PCES link statistics (Commsol docs/pces-link-stats.md)
+  LinkStats link_stats;      // PCES link statistics (docs/pces/link-stats.md)
   bool link_stats_on;
-  LoadStats load_stats;      // PCES channel load (Commsol docs/pces-load.md)
+  LoadStats load_stats;      // PCES channel load (docs/pces/load.md)
   bool load_on;
-  unsigned long next_busy_sample, last_load_tick;
+  unsigned long next_busy_sample;   // millis of the next busy-share reading
+  unsigned long last_load_tick;     // millis of the last once-a-second load update
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
   float pending_freq;

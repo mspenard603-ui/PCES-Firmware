@@ -1,9 +1,12 @@
 #pragma once
 
-// Channel load seen by this node: its own TX airtime, decoded RX airtime, how often the channel is
-// busy (RSSI above the noise floor), packet counts and its TX queue, per minute for the last hour
-// and per hour for the last day. Fed from counters the firmware keeps anyway (nothing sent).
-// Plain C++ (no Arduino), so it can be tested on a host. Spec: Commsol docs/pces-load.md.
+// Channel load seen by this node: its own TX airtime, the airtime of packets it decoded, how often
+// the channel is busy (RSSI above the noise floor), packet counts and its TX queue. Kept per minute
+// for the last hour and per hour for the last day, from counters the firmware keeps anyway
+// (nothing is sent).
+//
+// Plain C++ without Arduino, so it can be tested on a host (test/pces/test_loadstats.cpp).
+// Spec: docs/pces/load.md.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -34,14 +37,18 @@ struct LoadBucket {
 };
 
 class LoadStats {
-  LoadBucket _min[LOAD_MINUTES + 1], _hour[LOAD_HOURS + 1];   // complete ones + the open one
-  uint8_t _mi, _hi;            // the open (current) buckets
-  uint8_t _n_min, _n_hour;     // complete buckets
-  uint8_t _min_in_hour;        // minutes added to the open hour
-  LoadCounters _last;
+  // Ring buffers: the complete buckets plus the open one being filled.
+  LoadBucket _min[LOAD_MINUTES + 1];
+  LoadBucket _hour[LOAD_HOURS + 1];
+  uint8_t _mi, _hi;            // index of the open minute / hour
+  uint8_t _n_min, _n_hour;     // number of complete minutes / hours kept
+  uint8_t _min_in_hour;        // complete minutes added to the open hour so far
+  LoadCounters _last;          // counters at the previous tick
   bool _have_last;
 
-  static void add(LoadBucket& a, const LoadBucket& b);
+  static void add(LoadBucket& total, const LoadBucket& part);
+  const LoadBucket& completeMinute(int k) const;   // k = 1: the most recent complete minute
+  const LoadBucket& completeHour(int k) const;     // k = 1: the most recent complete hour
 public:
   LoadStats() { clear(); }
   void clear();
@@ -67,7 +74,7 @@ public:
   static uint16_t busyPermille(const LoadBucket& b);
   static uint16_t heldPermille(const LoadBucket& b);
 
-  // Wire form (docs/pces-load.md), 22 bytes little-endian: [covered min u16][tx u16][rx u16]
+  // Wire form (docs/pces/load.md), 22 bytes little-endian: [covered min u16][tx u16][rx u16]
   // [busy u16][held u16] (permille) [rx pkts u16][tx pkts u16][flood rx u16][flood dups u16]
   // [rx errors u16] (counts in the window, saturating) [queue avg x10 u8][queue max u8].
   // An empty window (ok false) is all zero with busy 0xFFFF.

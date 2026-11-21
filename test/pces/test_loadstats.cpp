@@ -1,4 +1,4 @@
-// Host test for MeshCore src/helpers/LoadStats (the PCES load firmware patch).
+// Host test for src/helpers/LoadStats (PCES channel load, docs/pces/load.md).
 //   g++ -std=c++17 -I src/helpers -o /tmp/tl test/pces/test_loadstats.cpp src/helpers/LoadStats.cpp && /tmp/tl
 #include "LoadStats.h"
 #include <stdio.h>
