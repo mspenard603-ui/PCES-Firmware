@@ -1,7 +1,7 @@
 # About PCES, the Path Computation Element Service
 
 This text is derived from Commsol's PCES documentation. Commsol is a server side implimentation
-of PCES developed by Michael Spenard as its first implimenation.
+of PCES developed by Michael Spenard.
 
 PCES follows the IETF's Path Computation Element architecture, RFC 4655: a service that computes
 paths on request from a database of link metrics.
