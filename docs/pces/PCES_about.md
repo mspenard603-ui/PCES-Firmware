@@ -26,7 +26,7 @@ MeshCore station that hosts PCES.
    of course, measures that link.
 5. **Neighbor tables:** repeater neighbor tables can be configured to be fetched automatically.
 6. **Repeaters running this firmware:** each measures its own links from the packets it receives
-   ([link stats](docs/pces/link-stats.md)) and its channel load ([load](docs/pces/load.md)), and
+   ([link stats](link-stats.md)) and its channel load ([load](load.md)), and
    answers a small request for them.
 
 ## Metric calculation, per direction

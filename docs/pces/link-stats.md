@@ -23,7 +23,7 @@ included, before routing), with `snr = pkt->getSNR()` and `rssi = _radio->getLas
 `hops` is the number of hashes already in a flood's path (`getPathHashCount()`, bits 0-5 of the
 path-length byte): each repeater that relays a flood appends its hash, so `path[hops-1]` is the
 repeater that sent the copy just heard. A flood arriving with path `6E 8B F7` has hops = 3, sent by
-F7. A TRACE's path field holds SNR bytes instead (`snrs` of them, one per hop done).
+F7. A TRACE's path field holds SNR bytes instead (`snrs` of them, one for each hop completed so far).
 
 | packet | sender of this copy | sampled |
 |---|---|---|
@@ -40,7 +40,7 @@ counted. A hash equal to the repeater's own is skipped.
 ## Keys
 
 A sample is stored against the neighbor's **public key prefix** (4 bytes) when its hash matches
-exactly one entry of the stock neighbor table (filled from zero-hop repeater adverts). Otherwise it
+exactly one entry of the legacy neighbor table (filled from zero-hop repeater adverts). Otherwise it
 is stored against the **hash as heard** (1 to 3 bytes) and flagged unresolved; the requester places
 it, for example by location.
 
@@ -53,7 +53,7 @@ is pooled into the longer one. A short hash that two longer entries extend stays
 ## Statistics
 
 Table `LinkStats`, 32 entries (`MAX_LINK_STATS`), RAM only (about 1 KB), emptied on reboot. The
-stock neighbor table is not touched.
+legacy neighbor table is not touched.
 
 | field | type | |
 |---|---|---|

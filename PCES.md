@@ -3,7 +3,7 @@
 Official MeshCore v1.18.0 (`81dbae592ffad40b4212bc0b37e82b38da08f4bc`) repeater firmware plus two
 measurements for PCES, the Path Computation Element Service (a best-path service for MeshCore, named
 after RFC 4655), on branch `pces-linkstats` of this repo. Specs: [`docs/pces/link-stats.md`](docs/pces/link-stats.md)
-and [`docs/pces/load.md`](docs/pces/load.md).
+and [`docs/pces/load.md`](docs/pces/load.md). What PCES is and how it scores links: [`docs/pces/PCES_about.md`](docs/pces/PCES_about.md).
 
 A repeater with this change measures how well it hears each neighboring repeater from the
 packets it receives anyway (nothing is sent on its own), and answers one anonymous request,
