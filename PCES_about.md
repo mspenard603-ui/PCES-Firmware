@@ -52,9 +52,8 @@ no measurement for 48 hours is marked stale.
    hop.
 2. If more than one path has the best score (e.g., two paths that both score 100), the one with the
    fewest hops wins. A path has at most 8 hops.
-3. A direction measured only the other way stands in for the missing one, marked `*` (links aren't
+3. A direction measured only the other way stands in for the missing one (links aren't
    always symmetric).
-4. The PCES station is only ever an end of a path, never a relay in the middle: whether it repeats
-   depends on its mode, so no path relies on it.
+
 
 The numbers here are Commsol's default settings as of (2026-11-21).
