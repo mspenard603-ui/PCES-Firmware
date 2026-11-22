@@ -19,15 +19,19 @@ firmware on both ends, a link is measured both ways.
 ## Samples
 
 Taken in `logRx()`, which `Dispatcher::checkRecv()` calls for every packet parsed (duplicates
-included, before routing), with `snr = pkt->getSNR()` and `rssi = _radio->getLastRSSI()`:
+included, before routing), with `snr = pkt->getSNR()` and `rssi = _radio->getLastRSSI()`.
+`hops` is the number of hashes already in a flood's path (`getPathHashCount()`, bits 0-5 of the
+path-length byte): each repeater that relays a flood appends its hash, so `path[hops-1]` is the
+repeater that sent the copy just heard. A flood arriving with path `6E 8B F7` has hops = 3, sent by
+F7. A TRACE's path field holds SNR bytes instead (`snrs` of them, one per hop done).
 
 | packet | sender of this copy | sampled |
 |---|---|---|
-| flood, path count k ≥ 1, not TRACE | `path[k-1]`, width `getPathHashSize()` | yes |
+| flood with hops ≥ 1, not TRACE | `path[hops-1]`, width `getPathHashSize()` | yes |
 | ADVERT with path count 0, repeater or room server | the advert's public key | yes (SNR only) |
 | ADVERT with path count 0, any other type (companion, sensor) | | **no**: no public list of the phones a repeater hears |
 | other flood, path count 0 | the originator, not named | no |
-| TRACE (direct) with k ≥ 1 SNR bytes | route hop k-1 (width `1 << (flags & 3)`) | yes |
+| TRACE (direct) with snrs ≥ 1 SNR bytes in its path | route hop snrs-1 (width `1 << (flags & 3)`) | yes |
 | other direct packets | not in the packet (the path holds the hops still ahead) | no |
 
 Last hops are always relays, so apart from zero-hop adverts only repeaters and room servers are

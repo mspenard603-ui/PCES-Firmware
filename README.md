@@ -10,7 +10,7 @@
 > - **Download:** [release v1.18.0-pces1](https://github.com/mspenard603-ui/PCES-Firmware/releases/tag/v1.18.0-pces1):
 >   one zip per board (Heltec V3, V4, T114, MeshSolar; RAK4631; SenseCAP Solar; Station G2), with
 >   `install.txt` for that board.
-> - **What it is, install, CLI:** [PCES.md](PCES.md). **Specs:** [link stats](docs/pces/link-stats.md),
+> - **What it is, install, CLI:** [PCES.md](PCES.md). **About PCES:** [PCES_about.md](PCES_about.md). **Specs:** [link stats](docs/pces/link-stats.md),
 >   [channel load](docs/pces/load.md).
 > - **Beta testers wanted:** tell us how it runs on your board:
 >   [open a beta report](https://github.com/mspenard603-ui/PCES-Firmware/issues/new?template=beta-report.yml).
