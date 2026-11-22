@@ -1,8 +1,7 @@
 # About PCES, the Path Computation Element Service
 
-This is the text behind the PCES "?" button in Commsol, the web console that hosts PCES. The
-repeater firmware in this repository feeds it: see [PCES.md](PCES.md) and the specs in
-[docs/pces/](docs/pces/).
+This text is derived from Commsol's PCES documentation. Commsol is a server side implimentation
+of PCES.
 
 PCES follows the IETF's Path Computation Element architecture, RFC 4655: a service that computes
 paths on request from a database of link metrics.
