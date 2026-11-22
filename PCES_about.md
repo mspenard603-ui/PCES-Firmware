@@ -1,4 +1,4 @@
-# About PCES, the Path Computation Element Service
+# Path Computation Element Service (PCES) - Server Side
 
 This text is derived from Commsol's PCES documentation. Commsol is a server side implimentation
 of PCES developed by Michael Spenard.
