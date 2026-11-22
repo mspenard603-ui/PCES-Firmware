@@ -57,4 +57,4 @@ no measurement for 48 hours is marked stale.
 4. The PCES station is only ever an end of a path, never a relay in the middle: whether it repeats
    depends on its mode, so no path relies on it.
 
-The numbers here are Commsol's current settings (2026-11-21).
+The numbers here are Commsol's default settings as of (2026-11-21).
