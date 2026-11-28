@@ -957,7 +957,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
-// The neighbor a packet was relayed by, from its hash: the one entry of the stock neighbor table
+// The neighbor a packet was relayed by, from its hash: the one entry of the legacy neighbor table
 // (filled from zero-hop repeater adverts) whose key starts with it. Writes its 4-byte key prefix;
 // false when no entry, or more than one, matches.
 bool MyMesh::resolveNeighbour(const uint8_t* hash, uint8_t len, uint8_t* key4) {
