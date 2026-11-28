@@ -48,9 +48,8 @@ load.md.
    fades while the link goes unmeasured.
 5. **metric = round(100 × q × c)**
 
-A link's **weaker direction** becomes the link's prevailing score. A Best Path is different: each of
-its legs is scored in the direction the path goes, A → B, not by the link's weaker score. A link with
-no measurement for 48 hours is marked stale.
+A link's **weaker direction** becomes the link's prevailing score. A Best Path is either one way or
+both ways (below). A link with no measurement for 48 hours is marked stale.
 
 ## Best Path
 
@@ -58,8 +57,16 @@ no measurement for 48 hours is marked stale.
    hop.
 2. If more than one path has the best score (e.g., two paths that both score 100), the one with the
    fewest hops wins. A path has at most 8 hops.
-3. A direction measured only the other way stands in for the missing one (links aren't
-   always symmetric).
+
+There are two kinds of Best Path:
+
+- **One way** (a client's PATH request): each leg is scored in the direction the path goes,
+  A → B, not by the link's weaker score. A direction measured only the other way stands in for the
+  missing one (links aren't always symmetric). This is the better route out, but its reverse is
+  unchecked.
+- **Both ways** (a client's PATH BOTH WAYS request): only links measured in both directions are
+  used, and each leg is scored by the link's weaker direction. The score holds whichever way the
+  path is used, so its reverse is safe to send to the far end as its route back.
 
 
 The numbers here are Commsol's default settings as of (2026-11-21).
