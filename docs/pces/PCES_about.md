@@ -63,10 +63,13 @@ There are two kinds of Best Path:
 - **One way** (a client's PATH request): each leg is scored in the direction the path goes,
   A → B, not by the link's weaker score. A direction measured only the other way stands in for the
   missing one (links aren't always symmetric). This is the better route out, but its reverse is
-  unchecked.
+  unchecked. Therefore, replies will not have the benefit of PCES. As the remote end will proceed
+  with its own PATH discovery.
 - **Both ways** (a client's PATH BOTH WAYS request): only links measured in both directions are
   used, and each leg is scored by the link's weaker direction. The score holds whichever way the
-  path is used, so its reverse is safe to send to the far end as its route back.
+  path is used, so its reverse is safe to send to the far end as its route back. Therefore, an
+  established contact on the remote end may have the benefit of PCES. As such a symetric best path
+  can be used to "seed" the remote end.
 
 
 The numbers here are Commsol's default settings as of (2026-11-21).
