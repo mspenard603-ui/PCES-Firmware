@@ -15,7 +15,7 @@ MeshCore station that hosts PCES.
 
 Optionally, and the reason for the firmwares found here, a PCES server may collect congestion 
 information from repeaters. With this further information PCES can provide clients with a Best
-Path that routes around overly burdened repeaters that may have a high chance of packet collisions
+Path that routes around overly burdened repeaters that may have a high chance for packet collisions
 etc. The details of added features this entails for a repeater can be found in link-stats.md and
 load.md.
 
