@@ -11,7 +11,7 @@ provisional until MeshCore allocates one.
 
 PCES (Path Computation Element Service, named after RFC 4655) answers "what is the best path from
 A to B?" from measured link quality. A PCES server can measure links only near its own station: its
-own traces, what it hears, the neighbor tables it can reach. A repeater hears its own links all
+own traces, what it hears, the neighbor tables it can reach. Whereas a repeater hears its own links all
 the time. Every flood packet it receives names the hop that just sent it (the last hash in the
 path), so it can measure **neighbor → itself** on every packet without transmitting. With the
 firmware on both ends, a link is measured both ways.
