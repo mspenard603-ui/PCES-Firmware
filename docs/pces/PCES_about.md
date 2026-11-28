@@ -13,6 +13,12 @@ routing tables. PCES, therefore, supplements MeshCore with its own metric (0–1
 measured at the receiving end of each link, per direction. Below, "the PCES station" means the
 MeshCore station that hosts PCES.
 
+Optionally, and the reason for the firmwares found here, a PCES server may collect congestion 
+information from repeaters. With this further information PCES can provide clients with a Best
+Path that routes around overly burdened repeaters that may have a high chance of packet collisions
+etc. The details of added features this entails for a repeater can be found in link-stats.md and
+load.md.
+
 ## Data collection
 
 1. **Overheard traces:** as a trace travels, each hop appends the SNR it received the trace at
